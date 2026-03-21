@@ -1,0 +1,1177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HEGEMONY — Globe RTS</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #000;
+    overflow: hidden;
+    font-family: 'Rajdhani', sans-serif;
+    color: #e0e0e0;
+    user-select: none;
+  }
+
+  #gameCanvas {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+  }
+
+  /* ── HUD ── */
+  #hud {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #hud > * { pointer-events: auto; }
+
+  .top-bar {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 50px;
+    background: linear-gradient(180deg, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.4) 80%, transparent 100%);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 24px;
+  }
+
+  .game-title {
+    font-family: 'Orbitron', sans-serif;
+    font-weight: 900;
+    font-size: 15px;
+    letter-spacing: 6px;
+    text-shadow: 0 0 15px rgba(0,229,255,0.5);
+  }
+
+  .faction-label {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 11px;
+    letter-spacing: 3px;
+    padding: 3px 10px;
+    border-radius: 3px;
+    border: 1px solid;
+  }
+
+  .resource-group {
+    display: flex;
+    gap: 18px;
+    margin-left: auto;
+  }
+
+  .resource {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
+  .resource .icon {
+    width: 18px; height: 18px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+  }
+
+  .res-minerals .icon { background: #4fc3f7; color: #000; }
+  .res-energy .icon { background: #ffd740; color: #000; }
+  .res-pop .icon { background: #69f0ae; color: #000; }
+
+  .connection-status {
+    font-size: 11px;
+    letter-spacing: 1px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.08);
+  }
+  .connection-status.connected { color: #69f0ae; border: 1px solid rgba(105,240,174,0.3); }
+  .connection-status.waiting { color: #ffd740; border: 1px solid rgba(255,215,64,0.3); }
+  .connection-status.disconnected { color: #ff5252; border: 1px solid rgba(255,82,82,0.3); }
+
+  /* Action Bar */
+  .action-bar {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .action-btn {
+    width: 52px; height: 52px;
+    background: rgba(0,10,20,0.85);
+    border: 1px solid rgba(0,229,255,0.3);
+    border-radius: 6px;
+    color: #00e5ff;
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    transition: all 0.15s;
+    backdrop-filter: blur(8px);
+  }
+
+  .action-btn:hover {
+    background: rgba(0,229,255,0.15);
+    border-color: #00e5ff;
+    transform: scale(1.05);
+  }
+
+  .action-btn .btn-icon { font-size: 20px; }
+  .action-btn.disabled { opacity: 0.3; pointer-events: none; }
+
+  /* Selection Panel */
+  .selection-panel {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,10,20,0.88);
+    border: 1px solid rgba(0,229,255,0.25);
+    border-radius: 8px;
+    padding: 12px 24px;
+    min-width: 260px;
+    text-align: center;
+    backdrop-filter: blur(12px);
+    display: none;
+  }
+
+  .selection-panel.visible { display: block; }
+
+  .selection-panel h3 {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 12px;
+    letter-spacing: 2px;
+    color: #00e5ff;
+    margin-bottom: 4px;
+  }
+
+  .selection-panel .stats { font-size: 13px; color: #aaa; }
+
+  /* Minimap */
+  .minimap-container {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    width: 150px; height: 150px;
+    border: 1px solid rgba(0,229,255,0.3);
+    border-radius: 50%;
+    overflow: hidden;
+    background: rgba(0,5,15,0.8);
+    backdrop-filter: blur(8px);
+  }
+
+  #minimapCanvas {
+    width: 100%; height: 100%;
+    border-radius: 50%;
+  }
+
+  /* Notification */
+  .notification {
+    position: absolute;
+    top: 65px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,10,20,0.9);
+    border: 1px solid rgba(255,215,64,0.4);
+    border-radius: 6px;
+    padding: 8px 20px;
+    font-size: 13px;
+    color: #ffd740;
+    font-weight: 600;
+    letter-spacing: 1px;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+  }
+
+  .notification.show { opacity: 1; }
+
+  /* Lobby overlay */
+  .lobby-overlay {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    background: rgba(2,8,16,0.92);
+    backdrop-filter: blur(8px);
+    pointer-events: auto;
+    transition: opacity 0.6s;
+  }
+
+  .lobby-overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .lobby-box {
+    text-align: center;
+    max-width: 500px;
+  }
+
+  .lobby-box h1 {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 40px;
+    font-weight: 900;
+    letter-spacing: 10px;
+    color: #00e5ff;
+    text-shadow: 0 0 40px rgba(0,229,255,0.5), 0 0 80px rgba(0,229,255,0.2);
+    margin-bottom: 10px;
+  }
+
+  .lobby-box .subtitle {
+    font-size: 14px;
+    color: #556677;
+    letter-spacing: 3px;
+    font-family: 'Orbitron', sans-serif;
+    margin-bottom: 30px;
+  }
+
+  .lobby-box .status-text {
+    font-size: 18px;
+    color: #aabbcc;
+    margin-bottom: 10px;
+    min-height: 30px;
+  }
+
+  .lobby-box .player-slots {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    margin-bottom: 30px;
+  }
+
+  .player-slot {
+    width: 160px;
+    padding: 16px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.03);
+  }
+
+  .player-slot.active {
+    border-color: rgba(0,229,255,0.5);
+    background: rgba(0,229,255,0.05);
+  }
+
+  .player-slot .slot-label {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 11px;
+    letter-spacing: 2px;
+    margin-bottom: 6px;
+  }
+
+  .player-slot .slot-status {
+    font-size: 14px;
+    color: #667788;
+  }
+
+  .player-slot.active .slot-status {
+    color: #00e5ff;
+  }
+
+  .lobby-box .controls-info {
+    font-size: 13px;
+    color: #556677;
+    line-height: 1.8;
+  }
+
+  .lobby-box .controls-info strong { color: #8899aa; }
+
+  /* Game Over overlay */
+  .gameover-overlay {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 60;
+    background: rgba(2,8,16,0.85);
+    backdrop-filter: blur(6px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.5s;
+  }
+
+  .gameover-overlay.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .gameover-overlay h1 {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 48px;
+    font-weight: 900;
+    letter-spacing: 8px;
+    text-shadow: 0 0 40px currentColor;
+  }
+
+  .gameover-overlay.win h1 { color: #00e5ff; }
+  .gameover-overlay.lose h1 { color: #ff5252; }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<div id="hud">
+  <div class="top-bar">
+    <div class="game-title" id="gameTitle">HEGEMONY</div>
+    <div class="faction-label" id="factionLabel" style="display:none">—</div>
+    <div class="resource-group">
+      <div class="resource res-minerals">
+        <div class="icon">M</div>
+        <span id="mineralCount">0</span>
+      </div>
+      <div class="resource res-energy">
+        <div class="icon">E</div>
+        <span id="energyCount">0</span>
+      </div>
+      <div class="resource res-pop">
+        <div class="icon">U</div>
+        <span id="popCount">0</span> / <span id="popCap">10</span>
+      </div>
+    </div>
+    <div class="connection-status waiting" id="connStatus">CONNECTING</div>
+  </div>
+
+  <div class="action-bar" id="actionBar" style="display:none">
+    <button class="action-btn" id="btnWorker" title="Build Worker (50M)">
+      <span class="btn-icon">⛏</span><span>WORK</span>
+    </button>
+    <button class="action-btn" id="btnSoldier" title="Build Soldier (80M 20E)">
+      <span class="btn-icon">⚔</span><span>ARMY</span>
+    </button>
+    <button class="action-btn" id="btnBase" title="Build Outpost (200M 50E)">
+      <span class="btn-icon">🏗</span><span>BASE</span>
+    </button>
+    <button class="action-btn" id="btnTurret" title="Build Turret (120M 40E)">
+      <span class="btn-icon">🔫</span><span>TURT</span>
+    </button>
+  </div>
+
+  <div class="minimap-container">
+    <canvas id="minimapCanvas" width="150" height="150"></canvas>
+  </div>
+
+  <div class="selection-panel" id="selectionPanel">
+    <h3 id="selName">—</h3>
+    <div class="stats" id="selStats">—</div>
+  </div>
+
+  <div class="notification" id="notification"></div>
+</div>
+
+<div class="lobby-overlay" id="lobbyOverlay">
+  <div class="lobby-box">
+    <h1>HEGEMONY</h1>
+    <div class="subtitle">GLOBE WARFARE</div>
+    <div class="status-text" id="lobbyStatus">Connecting to server...</div>
+    <div class="player-slots">
+      <div class="player-slot" id="slot1">
+        <div class="slot-label" style="color:#00e5ff">FACTION CYAN</div>
+        <div class="slot-status">Empty</div>
+      </div>
+      <div class="player-slot" id="slot2">
+        <div class="slot-label" style="color:#ff5252">FACTION RED</div>
+        <div class="slot-status">Empty</div>
+      </div>
+    </div>
+    <div class="controls-info">
+      <strong>Drag</strong> to orbit · <strong>Scroll</strong> to zoom<br>
+      <strong>Click</strong> to select · <strong>Right-click</strong> to command<br>
+      <strong>Shift+Click</strong> multi-select
+    </div>
+  </div>
+</div>
+
+<div class="gameover-overlay" id="gameoverOverlay">
+  <h1 id="gameoverText">—</h1>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ═══════════════════════════════════════════
+// HEGEMONY — Multiplayer Client
+// ═══════════════════════════════════════════
+
+const GLOBE_RADIUS = 5;
+const UNIT_SCALE = 0.12;
+const BUILDING_SCALE = 0.18;
+
+const FACTION_COLORS = {
+  1: { main: 0x00e5ff, emissive: 0x005566, ring: 0x00e5ff, hp: 0x00ff88, label: 'CYAN', css: '#00e5ff' },
+  2: { main: 0xff5252, emissive: 0x661a1a, ring: 0xff5252, hp: 0xff6666, label: 'RED', css: '#ff5252' },
+};
+
+const ENTITY_SHAPES = {
+  worker: 'box', soldier: 'cone', base: 'cylinder',
+  outpost: 'cylinder', turret: 'box', resource: 'resource',
+};
+
+// ── Client State ──
+const client = {
+  ws: null,
+  playerId: null,
+  faction: 0,
+  gameStarted: false,
+  entities: new Map(),    // id -> { serverData, mesh, ring, hpBarGroup, hpFill }
+  selectedIds: [],
+  placingBuilding: null,
+  notifyTimer: 0,
+};
+
+// ── Three.js ──
+const canvas = document.getElementById('gameCanvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x020810);
+scene.fog = new THREE.FogExp2(0x020810, 0.018);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(0, 4, 12);
+
+const ambientLight = new THREE.AmbientLight(0x334466, 0.6);
+scene.add(ambientLight);
+
+const sunLight = new THREE.DirectionalLight(0xffeedd, 1.4);
+sunLight.position.set(10, 8, 5);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(1024, 1024);
+scene.add(sunLight);
+
+const rimLight = new THREE.DirectionalLight(0x4488ff, 0.4);
+rimLight.position.set(-5, 3, -8);
+scene.add(rimLight);
+
+// Stars
+const starGeo = new THREE.BufferGeometry();
+const sv = [];
+for (let i = 0; i < 2500; i++) {
+  const r = 60 + Math.random() * 80;
+  const t = Math.random() * Math.PI * 2;
+  const p = Math.acos(2 * Math.random() - 1);
+  sv.push(r * Math.sin(p) * Math.cos(t), r * Math.sin(p) * Math.sin(t), r * Math.cos(p));
+}
+starGeo.setAttribute('position', new THREE.Float32BufferAttribute(sv, 3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xaabbdd, size: 0.3, sizeAttenuation: true })));
+
+// Globe Group
+const globeGroup = new THREE.Group();
+scene.add(globeGroup);
+
+// ── Terrain (identical noise to server) ──
+function hash(x, y, z) {
+  let h = (x | 0) * 374761393 + (y | 0) * 668265263 + (z | 0) * 1274126177;
+  h = ((h ^ (h >> 13)) * 1274126177) | 0;
+  return (h & 0x7fffffff) / 0x7fffffff;
+}
+function smoothNoise(x, y, z) {
+  const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+  const fx = x - ix, fy = y - iy, fz = z - iz;
+  const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy), sz = fz * fz * (3 - 2 * fz);
+  function h(a, b, c) { return hash(a & 0xff, b & 0xff, c & 0xff); }
+  return (
+    h(ix, iy, iz) * (1 - sx) * (1 - sy) * (1 - sz) +
+    h(ix + 1, iy, iz) * sx * (1 - sy) * (1 - sz) +
+    h(ix, iy + 1, iz) * (1 - sx) * sy * (1 - sz) +
+    h(ix + 1, iy + 1, iz) * sx * sy * (1 - sz) +
+    h(ix, iy, iz + 1) * (1 - sx) * (1 - sy) * sz +
+    h(ix + 1, iy, iz + 1) * sx * (1 - sy) * sz +
+    h(ix, iy + 1, iz + 1) * (1 - sx) * sy * sz +
+    h(ix + 1, iy + 1, iz + 1) * sx * sy * sz
+  ) * 2 - 1;
+}
+function fbmNoise(x, y, z) {
+  return smoothNoise(x, y, z) * 0.5 + smoothNoise(x * 2, y * 2, z * 2) * 0.25 + smoothNoise(x * 4, y * 4, z * 4) * 0.125;
+}
+function getSurfaceHeight(n) {
+  const s = 2.5;
+  let h = 0;
+  h += fbmNoise(n.x * s, n.y * s, n.z * s) * 0.3;
+  h += fbmNoise(n.x * s * 2 + 5, n.y * s * 2 + 5, n.z * s * 2 + 5) * 0.15;
+  h += fbmNoise(n.x * s * 4 + 10, n.y * s * 4 + 10, n.z * s * 4 + 10) * 0.07;
+  return GLOBE_RADIUS + h;
+}
+function posOnSurface(n, offset = 0.15) {
+  const h = getSurfaceHeight(n);
+  const len = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+  const f = (h + offset) / (len || 1);
+  return new THREE.Vector3(n.x * f, n.y * f, n.z * f);
+}
+
+let globeMesh;
+
+function createGlobe() {
+  const geo = new THREE.IcosahedronGeometry(GLOBE_RADIUS, 5);
+  const pos = geo.attributes.position;
+  const colors = [];
+  for (let i = 0; i < pos.count; i++) {
+    const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
+    const n = v.clone().normalize();
+    let height = 0;
+    const s = 2.5;
+    height += fbmNoise(n.x * s, n.y * s, n.z * s) * 0.3;
+    height += fbmNoise(n.x * s * 2 + 5, n.y * s * 2 + 5, n.z * s * 2 + 5) * 0.15;
+    height += fbmNoise(n.x * s * 4 + 10, n.y * s * 4 + 10, n.z * s * 4 + 10) * 0.07;
+    const r = GLOBE_RADIUS + height;
+    v.copy(n).multiplyScalar(r);
+    pos.setXYZ(i, v.x, v.y, v.z);
+    let c;
+    if (height < -0.05) c = new THREE.Color(0x1a4a7a).lerp(new THREE.Color(0x2266aa), (height + 0.3) / 0.25);
+    else if (height < 0.05) c = new THREE.Color(0x6b9b5e);
+    else if (height < 0.2) c = new THREE.Color(0x4a7a3e).lerp(new THREE.Color(0x8a7a50), (height - 0.05) / 0.15);
+    else c = new THREE.Color(0x9a9a8a).lerp(new THREE.Color(0xdde0e5), (height - 0.2) / 0.25);
+    colors.push(c.r, c.g, c.b);
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.08 });
+  globeMesh = new THREE.Mesh(geo, mat);
+  globeMesh.castShadow = true;
+  globeMesh.receiveShadow = true;
+  globeGroup.add(globeMesh);
+
+  // Atmosphere
+  const atmosGeo = new THREE.SphereGeometry(GLOBE_RADIUS * 1.025, 48, 48);
+  const atmosMat = new THREE.ShaderMaterial({
+    vertexShader: `varying vec3 vNormal; void main(){vNormal=normalize(normalMatrix*normal);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+    fragmentShader: `varying vec3 vNormal; void main(){float i=pow(0.72-dot(vNormal,vec3(0,0,1)),2.5);gl_FragColor=vec4(0.3,0.7,1.0,i*0.4);}`,
+    transparent: true, side: THREE.BackSide, depthWrite: false,
+  });
+  globeGroup.add(new THREE.Mesh(atmosGeo, atmosMat));
+
+  // Water
+  const waterMat = new THREE.MeshStandardMaterial({ color: 0x1a4a7a, roughness: 0.15, metalness: 0.3, transparent: true, opacity: 0.85 });
+  const water = new THREE.Mesh(new THREE.SphereGeometry(GLOBE_RADIUS - 0.03, 48, 48), waterMat);
+  water.receiveShadow = true;
+  globeGroup.add(water);
+}
+
+createGlobe();
+
+// ── Camera Controls ──
+let isDragging = false;
+let prevMouse = { x: 0, y: 0 };
+let cameraTheta = 0, cameraPhi = Math.PI / 3, cameraDistance = 14;
+
+function updateCamera() {
+  camera.position.set(
+    cameraDistance * Math.sin(cameraPhi) * Math.cos(cameraTheta),
+    cameraDistance * Math.cos(cameraPhi),
+    cameraDistance * Math.sin(cameraPhi) * Math.sin(cameraTheta)
+  );
+  camera.lookAt(0, 0, 0);
+}
+
+canvas.addEventListener('mousedown', e => { if (e.button === 0) isDragging = true; prevMouse = { x: e.clientX, y: e.clientY }; });
+canvas.addEventListener('mousemove', e => {
+  if (isDragging) {
+    cameraTheta -= (e.clientX - prevMouse.x) * 0.005;
+    cameraPhi = Math.max(0.3, Math.min(Math.PI - 0.3, cameraPhi + (e.clientY - prevMouse.y) * 0.005));
+    prevMouse = { x: e.clientX, y: e.clientY };
+  }
+});
+canvas.addEventListener('mouseup', () => isDragging = false);
+canvas.addEventListener('wheel', e => { cameraDistance = Math.max(7, Math.min(25, cameraDistance + e.deltaY * 0.01)); });
+
+// ── Raycasting ──
+const raycaster = new THREE.Raycaster();
+const mouseVec = new THREE.Vector2();
+
+function getGlobeNormal(event) {
+  mouseVec.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouseVec.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouseVec, camera);
+  const hits = raycaster.intersectObject(globeMesh);
+  if (hits.length > 0) return hits[0].point.clone().normalize();
+  return null;
+}
+
+function getEntityAtClick(event) {
+  mouseVec.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouseVec.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouseVec, camera);
+  const meshes = [];
+  const idMap = [];
+  client.entities.forEach((ent, id) => {
+    if (ent.mesh) { meshes.push(ent.mesh); idMap.push(id); }
+  });
+  const hits = raycaster.intersectObjects(meshes);
+  if (hits.length > 0) {
+    const idx = meshes.indexOf(hits[0].object);
+    if (idx >= 0) return idMap[idx];
+  }
+  return null;
+}
+
+// ── Entity Visual Management ──
+function getOrCreateVisual(id, serverData) {
+  let ent = client.entities.get(id);
+
+  if (!ent) {
+    ent = { serverData: null, mesh: null, ring: null, hpBarGroup: null, hpFill: null };
+
+    const type = serverData.type;
+    if (type === 'resource') {
+      const isMin = serverData.resourceType === 'minerals';
+      const geo = isMin ? new THREE.OctahedronGeometry(0.12, 0) : new THREE.TetrahedronGeometry(0.13, 0);
+      const mat = new THREE.MeshStandardMaterial({
+        color: isMin ? 0x4fc3f7 : 0xffd740,
+        emissive: isMin ? 0x1a6688 : 0x886a10,
+        emissiveIntensity: 0.6, roughness: 0.3, metalness: 0.5,
+      });
+      ent.mesh = new THREE.Mesh(geo, mat);
+      globeGroup.add(ent.mesh);
+    } else {
+      const isB = serverData.isBuilding;
+      const scale = isB ? BUILDING_SCALE : UNIT_SCALE;
+      const shape = ENTITY_SHAPES[type] || 'box';
+      let geo;
+      switch (shape) {
+        case 'box': geo = new THREE.BoxGeometry(scale, scale, scale); break;
+        case 'cone': geo = new THREE.ConeGeometry(scale * 0.6, scale * 1.4, 6); break;
+        case 'cylinder': geo = new THREE.CylinderGeometry(scale * 0.8, scale * 1, scale * 1.2, 8); break;
+        default: geo = new THREE.BoxGeometry(scale, scale, scale);
+      }
+
+      const fc = FACTION_COLORS[serverData.faction];
+      const color = fc ? fc.main : 0x888888;
+      const emissive = fc ? fc.emissive : 0x222222;
+
+      const mat = new THREE.MeshStandardMaterial({
+        color, emissive, emissiveIntensity: 0.25, roughness: 0.5, metalness: 0.4,
+      });
+      ent.mesh = new THREE.Mesh(geo, mat);
+      ent.mesh.castShadow = true;
+      globeGroup.add(ent.mesh);
+
+      // Selection ring
+      const ringGeo = new THREE.RingGeometry(scale * 1.2, scale * 1.5, 16);
+      const ringColor = fc ? fc.ring : 0xffffff;
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: ringColor, transparent: true, opacity: 0, side: THREE.DoubleSide, depthTest: false,
+      });
+      ent.ring = new THREE.Mesh(ringGeo, ringMat);
+      globeGroup.add(ent.ring);
+
+      // HP bar
+      const hpG = new THREE.Group();
+      hpG.add(new THREE.Mesh(
+        new THREE.PlaneGeometry(0.3, 0.04),
+        new THREE.MeshBasicMaterial({ color: 0x330000, transparent: true, opacity: 0.7, side: THREE.DoubleSide, depthTest: false })
+      ));
+      const hpColor = fc ? fc.hp : 0x00ff00;
+      ent.hpFill = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.3, 0.04),
+        new THREE.MeshBasicMaterial({ color: hpColor, side: THREE.DoubleSide, depthTest: false })
+      );
+      hpG.add(ent.hpFill);
+      hpG.visible = false;
+      ent.hpBarGroup = hpG;
+      globeGroup.add(hpG);
+    }
+
+    client.entities.set(id, ent);
+  }
+
+  return ent;
+}
+
+function removeVisual(id) {
+  const ent = client.entities.get(id);
+  if (!ent) return;
+  if (ent.mesh) globeGroup.remove(ent.mesh);
+  if (ent.ring) globeGroup.remove(ent.ring);
+  if (ent.hpBarGroup) globeGroup.remove(ent.hpBarGroup);
+  client.entities.delete(id);
+}
+
+// ── Apply Server State ──
+function applyState(stateMsg) {
+  const aliveIds = new Set();
+
+  for (const sd of stateMsg.entities) {
+    aliveIds.add(sd.id);
+    const ent = getOrCreateVisual(sd.id, sd);
+    ent.serverData = sd;
+
+    const n = sd.pos;
+    const pos = posOnSurface(n, sd.isBuilding ? 0.12 : sd.type === 'resource' ? 0.1 : 0.1);
+    ent.mesh.position.copy(pos);
+
+    const up = new THREE.Vector3(n.x, n.y, n.z).normalize();
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), up);
+    ent.mesh.setRotationFromQuaternion(q);
+
+    if (ent.ring) {
+      ent.ring.position.copy(pos);
+      ent.ring.lookAt(pos.clone().add(up));
+      ent.ring.position.add(up.clone().multiplyScalar(-0.05));
+
+      const isSelected = client.selectedIds.includes(sd.id);
+      ent.ring.material.opacity = isSelected ? 0.6 : 0;
+    }
+
+    if (ent.hpBarGroup && sd.maxHp) {
+      const hpPos = posOnSurface(n, sd.isBuilding ? 0.35 : 0.25);
+      ent.hpBarGroup.position.copy(hpPos);
+      ent.hpBarGroup.lookAt(camera.position);
+      const ratio = Math.max(0, sd.hp / sd.maxHp);
+      ent.hpFill.scale.x = ratio;
+      ent.hpFill.position.x = -(1 - ratio) * 0.15;
+
+      const isSelected = client.selectedIds.includes(sd.id);
+      ent.hpBarGroup.visible = isSelected || sd.hp < sd.maxHp;
+    }
+  }
+
+  // Remove dead
+  for (const [id] of client.entities) {
+    if (!aliveIds.has(id)) removeVisual(id);
+  }
+
+  // Events (projectiles, explosions)
+  for (const ev of (stateMsg.events || [])) {
+    if (ev.type === 'explosion') spawnExplosion(ev.pos);
+    if (ev.type === 'projectile') spawnProjectile(ev.from, ev.to, ev.faction);
+  }
+
+  // Player resources
+  const myState = stateMsg.players[client.playerId];
+  if (myState) {
+    document.getElementById('mineralCount').textContent = myState.minerals;
+    document.getElementById('energyCount').textContent = myState.energy;
+    document.getElementById('popCount').textContent = myState.pop;
+    document.getElementById('popCap').textContent = myState.popCap;
+  }
+}
+
+// ── Particles ──
+const particles = [];
+
+function spawnExplosion(pos) {
+  for (let i = 0; i < 10; i++) {
+    const geo = new THREE.SphereGeometry(0.02 + Math.random() * 0.03, 4, 4);
+    const mat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color().setHSL(0.05 + Math.random() * 0.1, 1, 0.5 + Math.random() * 0.3),
+      transparent: true, opacity: 1,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    const p = posOnSurface(pos, 0.15);
+    mesh.position.copy(p);
+    globeGroup.add(mesh);
+    particles.push({
+      mesh,
+      vel: new THREE.Vector3((Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2),
+      life: 0.6 + Math.random() * 0.4,
+      maxLife: 0.6 + Math.random() * 0.4,
+    });
+  }
+}
+
+const projectiles = [];
+
+function spawnProjectile(from, to, faction) {
+  const geo = new THREE.SphereGeometry(0.03, 4, 4);
+  const color = FACTION_COLORS[faction]?.main || 0xffffff;
+  const mat = new THREE.MeshBasicMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  const startPos = posOnSurface(from, 0.15);
+  mesh.position.copy(startPos);
+  globeGroup.add(mesh);
+  projectiles.push({
+    mesh,
+    start: startPos,
+    end: posOnSurface(to, 0.15),
+    t: 0,
+  });
+}
+
+function updateParticlesAndProjectiles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { globeGroup.remove(p.mesh); particles.splice(i, 1); continue; }
+    p.mesh.position.add(p.vel.clone().multiplyScalar(dt));
+    p.mesh.material.opacity = p.life / p.maxLife;
+    p.vel.multiplyScalar(0.96);
+  }
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.t += dt * 4;
+    if (p.t >= 1) { globeGroup.remove(p.mesh); projectiles.splice(i, 1); continue; }
+    p.mesh.position.lerpVectors(p.start, p.end, p.t);
+    const mid = 0.5 - Math.abs(p.t - 0.5);
+    const arcN = p.mesh.position.clone().normalize();
+    p.mesh.position.add(arcN.multiplyScalar(mid * 0.3));
+  }
+}
+
+// ── Click Handling ──
+let mouseDownPos = { x: 0, y: 0 };
+
+canvas.addEventListener('mousedown', e => { mouseDownPos = { x: e.clientX, y: e.clientY }; });
+
+canvas.addEventListener('click', e => {
+  if (!client.gameStarted) return;
+  const dx = e.clientX - mouseDownPos.x, dy = e.clientY - mouseDownPos.y;
+  if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+
+  // Placing building
+  if (client.placingBuilding) {
+    const normal = getGlobeNormal(e);
+    if (normal) {
+      sendCommand({
+        action: 'build_structure',
+        structType: client.placingBuilding,
+        pos: { x: normal.x, y: normal.y, z: normal.z },
+      });
+    }
+    client.placingBuilding = null;
+    return;
+  }
+
+  const clickedId = getEntityAtClick(e);
+
+  if (!e.shiftKey) {
+    client.selectedIds = [];
+  }
+
+  if (clickedId != null) {
+    const ent = client.entities.get(clickedId);
+    if (ent && ent.serverData && ent.serverData.faction === client.faction) {
+      if (!client.selectedIds.includes(clickedId)) {
+        client.selectedIds.push(clickedId);
+      }
+    }
+  }
+  updateSelectionPanel();
+});
+
+canvas.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (!client.gameStarted || client.selectedIds.length === 0) return;
+
+  // Filter to only our movable units
+  const unitIds = client.selectedIds.filter(id => {
+    const ent = client.entities.get(id);
+    return ent && ent.serverData && !ent.serverData.isBuilding && ent.serverData.faction === client.faction;
+  });
+  if (unitIds.length === 0) return;
+
+  const clickedId = getEntityAtClick(e);
+
+  if (clickedId != null) {
+    const ent = client.entities.get(clickedId);
+    if (ent && ent.serverData) {
+      if (ent.serverData.faction !== client.faction && ent.serverData.faction !== 0) {
+        sendCommand({ action: 'attack', unitIds, targetId: clickedId });
+        notify('Attack order');
+        return;
+      }
+      if (ent.serverData.type === 'resource') {
+        sendCommand({ action: 'gather', unitIds, targetId: clickedId });
+        notify('Gathering');
+        return;
+      }
+    }
+  }
+
+  const normal = getGlobeNormal(e);
+  if (normal) {
+    sendCommand({ action: 'move', unitIds, target: { x: normal.x, y: normal.y, z: normal.z } });
+    spawnMoveIndicator(normal);
+  }
+});
+
+function spawnMoveIndicator(normal) {
+  const pos = posOnSurface(normal, 0.05);
+  const geo = new THREE.RingGeometry(0.05, 0.15, 16);
+  const mat = new THREE.MeshBasicMaterial({
+    color: FACTION_COLORS[client.faction]?.main || 0x00e5ff,
+    transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthTest: false,
+  });
+  const ring = new THREE.Mesh(geo, mat);
+  ring.position.copy(pos);
+  ring.lookAt(pos.clone().add(normal));
+  globeGroup.add(ring);
+  const start = performance.now();
+  (function anim() {
+    const t = (performance.now() - start) / 1000;
+    if (t > 0.6) { globeGroup.remove(ring); return; }
+    ring.scale.setScalar(1 + t * 2);
+    ring.material.opacity = 0.8 * (1 - t / 0.6);
+    requestAnimationFrame(anim);
+  })();
+}
+
+// ── UI Buttons ──
+document.getElementById('btnWorker').addEventListener('click', () => {
+  if (!client.gameStarted) return;
+  sendCommand({ action: 'build_unit', unitType: 'worker' });
+});
+document.getElementById('btnSoldier').addEventListener('click', () => {
+  if (!client.gameStarted) return;
+  sendCommand({ action: 'build_unit', unitType: 'soldier' });
+});
+document.getElementById('btnBase').addEventListener('click', () => {
+  if (!client.gameStarted) return;
+  client.placingBuilding = 'outpost';
+  notify('Click globe to place Outpost');
+});
+document.getElementById('btnTurret').addEventListener('click', () => {
+  if (!client.gameStarted) return;
+  client.placingBuilding = 'turret';
+  notify('Click globe to place Turret');
+});
+
+function updateSelectionPanel() {
+  const panel = document.getElementById('selectionPanel');
+  const nameEl = document.getElementById('selName');
+  const statsEl = document.getElementById('selStats');
+
+  if (client.selectedIds.length === 0) {
+    panel.classList.remove('visible');
+    return;
+  }
+  panel.classList.add('visible');
+
+  if (client.selectedIds.length === 1) {
+    const ent = client.entities.get(client.selectedIds[0]);
+    const sd = ent?.serverData;
+    if (sd) {
+      nameEl.textContent = sd.name || sd.type;
+      statsEl.textContent = `HP: ${Math.ceil(sd.hp)}/${sd.maxHp}` +
+        (sd.attack ? ` · ATK: ${sd.attack}` : '') +
+        (sd.gatherRate ? ` · Gather: ${sd.gatherRate}/s` : '');
+    }
+  } else {
+    nameEl.textContent = `${client.selectedIds.length} UNITS`;
+    let totalHp = 0;
+    for (const id of client.selectedIds) {
+      const ent = client.entities.get(id);
+      if (ent?.serverData) totalHp += ent.serverData.hp;
+    }
+    statsEl.textContent = `Total HP: ${Math.ceil(totalHp)}`;
+  }
+}
+
+// ── Notification ──
+function notify(text) {
+  const el = document.getElementById('notification');
+  el.textContent = text;
+  el.classList.add('show');
+  client.notifyTimer = 2;
+}
+
+// ── Minimap ──
+const mmCanvas = document.getElementById('minimapCanvas');
+const mCtx = mmCanvas.getContext('2d');
+
+function updateMinimap() {
+  const w = mmCanvas.width, h = mmCanvas.height;
+  mCtx.clearRect(0, 0, w, h);
+  mCtx.fillStyle = 'rgba(0,15,30,0.9)';
+  mCtx.beginPath();
+  mCtx.arc(w / 2, h / 2, w / 2 - 2, 0, Math.PI * 2);
+  mCtx.fill();
+
+  const cx = w / 2, cy = h / 2, r = w / 2 - 8;
+  const camDir = camera.position.clone().normalize();
+  const right = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), camDir).normalize();
+  const up = new THREE.Vector3().crossVectors(camDir, right).normalize();
+
+  client.entities.forEach((ent) => {
+    const sd = ent.serverData;
+    if (!sd) return;
+    const p = new THREE.Vector3(sd.pos.x, sd.pos.y, sd.pos.z);
+    const z = p.dot(camDir);
+    if (z < -0.1) return;
+    const x = p.dot(right), y = p.dot(up);
+    const px = cx + x * r, py = cy - y * r;
+    let color;
+    const fc = FACTION_COLORS[sd.faction];
+    if (fc) color = fc.css;
+    else color = sd.resourceType === 'minerals' ? '#4fc3f7' : '#ffd740';
+
+    const dotSize = sd.isBuilding || sd.type === 'base' ? 4 : 2;
+    mCtx.fillStyle = color;
+    mCtx.beginPath();
+    mCtx.arc(px, py, dotSize, 0, Math.PI * 2);
+    mCtx.fill();
+  });
+}
+
+// ── WebSocket ──
+function connectWS() {
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${protocol}://${window.location.host}`);
+  client.ws = ws;
+
+  ws.onopen = () => {
+    document.getElementById('connStatus').textContent = 'CONNECTED';
+    document.getElementById('connStatus').className = 'connection-status connected';
+  };
+
+  ws.onclose = () => {
+    document.getElementById('connStatus').textContent = 'DISCONNECTED';
+    document.getElementById('connStatus').className = 'connection-status disconnected';
+    document.getElementById('lobbyStatus').textContent = 'Connection lost. Refresh to rejoin.';
+    // Try reconnect after 3 seconds
+    setTimeout(connectWS, 3000);
+  };
+
+  ws.onerror = () => {};
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+
+    switch (msg.type) {
+      case 'assigned':
+        client.playerId = msg.playerId;
+        client.faction = msg.faction;
+        const fc = FACTION_COLORS[client.faction];
+        document.getElementById('gameTitle').style.color = fc.css;
+        const label = document.getElementById('factionLabel');
+        label.style.display = 'inline';
+        label.textContent = `FACTION ${fc.label}`;
+        label.style.color = fc.css;
+        label.style.borderColor = fc.css + '55';
+        break;
+
+      case 'lobby':
+        updateLobby(msg);
+        break;
+
+      case 'gameStart':
+        client.gameStarted = true;
+        document.getElementById('lobbyOverlay').classList.add('hidden');
+        document.getElementById('actionBar').style.display = 'flex';
+        break;
+
+      case 'state':
+        applyState(msg);
+        break;
+
+      case 'notify':
+        notify(msg.msg);
+        break;
+
+      case 'gameOver':
+        const overlay = document.getElementById('gameoverOverlay');
+        const text = document.getElementById('gameoverText');
+        const iWin = msg.winner === client.faction;
+        overlay.className = `gameover-overlay visible ${iWin ? 'win' : 'lose'}`;
+        text.textContent = iWin ? 'VICTORY' : 'DEFEAT';
+        break;
+
+      case 'playerLeft':
+        notify('Opponent disconnected');
+        break;
+
+      case 'error':
+        notify(msg.msg);
+        break;
+    }
+  };
+}
+
+function updateLobby(msg) {
+  const slot1 = document.getElementById('slot1');
+  const slot2 = document.getElementById('slot2');
+
+  const p1 = msg.players.find(p => p.id === 'p1');
+  const p2 = msg.players.find(p => p.id === 'p2');
+
+  slot1.classList.toggle('active', !!p1);
+  slot1.querySelector('.slot-status').textContent = p1
+    ? (p1.id === client.playerId ? 'You' : 'Opponent')
+    : 'Empty';
+
+  slot2.classList.toggle('active', !!p2);
+  slot2.querySelector('.slot-status').textContent = p2
+    ? (p2.id === client.playerId ? 'You' : 'Opponent')
+    : 'Empty';
+
+  if (msg.players.length === 1) {
+    document.getElementById('lobbyStatus').textContent = 'Waiting for opponent...';
+  } else if (msg.players.length === 2) {
+    document.getElementById('lobbyStatus').textContent = 'Both players connected! Starting...';
+  }
+}
+
+function sendCommand(cmd) {
+  if (client.ws && client.ws.readyState === WebSocket.OPEN) {
+    client.ws.send(JSON.stringify({ type: 'command', ...cmd }));
+  }
+}
+
+// ── Game Loop ──
+let lastTime = performance.now();
+
+function gameLoop() {
+  requestAnimationFrame(gameLoop);
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  updateCamera();
+  updateParticlesAndProjectiles(dt);
+
+  if (client.gameStarted) {
+    updateMinimap();
+    updateSelectionPanel();
+
+    if (client.notifyTimer > 0) {
+      client.notifyTimer -= dt;
+      if (client.notifyTimer <= 0) {
+        document.getElementById('notification').classList.remove('show');
+      }
+    }
+  }
+
+  renderer.render(scene, camera);
+}
+
+// ── Init ──
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+updateCamera();
+connectWS();
+gameLoop();
+</script>
+</body>
+</html>
