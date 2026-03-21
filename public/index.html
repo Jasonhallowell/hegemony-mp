@@ -156,11 +156,20 @@
   .gameover-overlay h1 { font-family: 'Orbitron', sans-serif; font-size: 48px; font-weight: 900; letter-spacing: 8px; text-shadow: 0 0 40px currentColor; }
   .gameover-overlay.win  h1 { color: #00e5ff; }
   .gameover-overlay.lose h1 { color: #ff5252; }
+
+  /* Drag selection box */
+  #selBox {
+    position: fixed; pointer-events: none; z-index: 20;
+    border: 1px solid rgba(0,229,255,0.8);
+    background: rgba(0,229,255,0.06);
+    display: none;
+  }
 </style>
 </head>
 <body>
 
 <canvas id="gameCanvas"></canvas>
+<div id="selBox"></div>
 
 <div id="hud">
   <div class="top-bar">
@@ -493,15 +502,16 @@ function updateCamera() {
   camera.lookAt(0, 0, 0);
 }
 
-canvas.addEventListener('mousedown', e => { if (e.button === 0) isDragging = true; prevMouse = {x: e.clientX, y: e.clientY}; });
+canvas.addEventListener('mousedown', e => { if (e.button === 0) { isDragging = true; prevMouse = {x: e.clientX, y: e.clientY}; } });
 canvas.addEventListener('mousemove', e => {
-  if (isDragging) {
+  // Only orbit camera if not drag-selecting units
+  if (isDragging && !dragSelecting) {
     cameraTheta -= (e.clientX - prevMouse.x) * 0.005;
     cameraPhi = Math.max(0.3, Math.min(Math.PI - 0.3, cameraPhi + (e.clientY - prevMouse.y) * 0.005));
     prevMouse = {x: e.clientX, y: e.clientY};
   }
 });
-canvas.addEventListener('mouseup',   () => isDragging = false);
+canvas.addEventListener('mouseup', () => isDragging = false);
 canvas.addEventListener('wheel', e => { cameraDistance = Math.max(7, Math.min(28, cameraDistance + e.deltaY * 0.012)); });
 
 // ── Raycasting ──
@@ -1115,9 +1125,64 @@ function updateParticlesAndProjectiles(dt) {
   }
 }
 
-// ── Click Handling ──
+// ── Click / Drag-Select / Double-click Handling ──
 let mouseDownPos = { x: 0, y: 0 };
-canvas.addEventListener('mousedown', e => { mouseDownPos = { x: e.clientX, y: e.clientY }; });
+let dragSelecting = false;
+const selBox = document.getElementById('selBox');
+
+function worldToScreen(worldPos) {
+  const v = worldPos.clone().project(camera);
+  return {
+    x: (v.x + 1) / 2 * window.innerWidth,
+    y: (-v.y + 1) / 2 * window.innerHeight,
+  };
+}
+
+canvas.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  mouseDownPos = { x: e.clientX, y: e.clientY };
+  dragSelecting = false;
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (!(e.buttons & 1) || !client.gameStarted) return;
+  const dx = e.clientX - mouseDownPos.x, dy = e.clientY - mouseDownPos.y;
+  if (!dragSelecting && Math.sqrt(dx*dx + dy*dy) > 6) dragSelecting = true;
+  if (dragSelecting) {
+    const x1 = Math.min(mouseDownPos.x, e.clientX), y1 = Math.min(mouseDownPos.y, e.clientY);
+    const x2 = Math.max(mouseDownPos.x, e.clientX), y2 = Math.max(mouseDownPos.y, e.clientY);
+    selBox.style.display = 'block';
+    selBox.style.left    = x1 + 'px';
+    selBox.style.top     = y1 + 'px';
+    selBox.style.width   = (x2 - x1) + 'px';
+    selBox.style.height  = (y2 - y1) + 'px';
+  }
+});
+
+canvas.addEventListener('mouseup', e => {
+  if (e.button !== 0) return;
+  selBox.style.display = 'none';
+  if (!client.gameStarted) { dragSelecting = false; return; }
+
+  if (dragSelecting) {
+    // Select all own units inside the drag rectangle
+    const x1 = Math.min(mouseDownPos.x, e.clientX), y1 = Math.min(mouseDownPos.y, e.clientY);
+    const x2 = Math.max(mouseDownPos.x, e.clientX), y2 = Math.max(mouseDownPos.y, e.clientY);
+    if (!e.shiftKey) client.selectedIds = [];
+    client.entities.forEach((ent, id) => {
+      const sd = ent.serverData;
+      if (!sd || sd.faction !== client.faction || sd.isBuilding) return;
+      const screen = worldToScreen(ent.mesh.position);
+      if (screen.x >= x1 && screen.x <= x2 && screen.y >= y1 && screen.y <= y2) {
+        if (!client.selectedIds.includes(id)) client.selectedIds.push(id);
+      }
+    });
+    updateSelectionPanel();
+    dragSelecting = false;
+    return;
+  }
+  dragSelecting = false;
+});
 
 canvas.addEventListener('click', e => {
   if (!client.gameStarted) return;
@@ -1139,6 +1204,24 @@ canvas.addEventListener('click', e => {
     if (ent?.serverData?.faction === client.faction && !client.selectedIds.includes(clickedId))
       client.selectedIds.push(clickedId);
   }
+  updateSelectionPanel();
+});
+
+canvas.addEventListener('dblclick', e => {
+  if (!client.gameStarted) return;
+  const clickedId = getEntityAtClick(e);
+  if (clickedId == null) return;
+  const clicked = client.entities.get(clickedId);
+  if (!clicked?.serverData || clicked.serverData.faction !== client.faction) return;
+  const matchType = clicked.serverData.type;
+  // Select all visible units of the same type belonging to the player
+  client.selectedIds = [];
+  client.entities.forEach((ent, id) => {
+    const sd = ent.serverData;
+    if (sd && sd.type === matchType && sd.faction === client.faction) {
+      client.selectedIds.push(id);
+    }
+  });
   updateSelectionPanel();
 });
 
@@ -1395,13 +1478,6 @@ function updateEntities(dt) {
           ent.mesh.setRotationFromMatrix(new THREE.Matrix4().makeBasis(forward, up, right));
         }
       }
-    }
-
-    // ── Resource bobbing & spin ──
-    if (sd.type === 'resource') {
-      const bob = Math.sin(now * 0.0014 + id * 2.1) * 0.055;
-      ent.mesh.position.copy(ent.targetPos).add(up.clone().multiplyScalar(bob));
-      ent.mesh.rotation.y += dt * 1.5;
     }
 
     // ── Selection ring: follow mesh + pulse ──
