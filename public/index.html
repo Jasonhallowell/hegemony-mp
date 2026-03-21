@@ -902,31 +902,39 @@ function applyState(stateMsg) {
     ent.serverData = sd;
 
     const n = sd.pos;
-    // Air units float higher, naval units sit low on water
     const surfOffset = sd.isAir ? 0.55 : sd.isNaval ? 0.06 : (sd.isBuilding ? 0.14 : 0.12);
     const pos = posOnSurface(n, surfOffset);
-    ent.mesh.position.copy(pos);
+    const up  = new THREE.Vector3(n.x, n.y, n.z).normalize();
 
-    const up = new THREE.Vector3(n.x, n.y, n.z).normalize();
-    const q  = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), up);
-    ent.mesh.setRotationFromQuaternion(q);
+    // Store interpolation targets — gameLoop will lerp toward these
+    ent.targetPos = pos;
+    ent.targetUp  = up;
 
-    // Resource nodes spin slowly
-    if (sd.type === 'resource') {
-      ent.mesh.rotation.y += 0.01;
+    // Snap buildings/resources immediately (they don't move)
+    if (sd.isBuilding || sd.type === 'resource') {
+      ent.mesh.position.copy(pos);
+      if (sd.isBuilding) {
+        ent.mesh.setRotationFromQuaternion(
+          new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), up)
+        );
+      }
+    } else if (!ent.initialised) {
+      // First time: snap mobile unit to position so it doesn't lerp from origin
+      ent.mesh.position.copy(pos);
+      ent.mesh.setRotationFromQuaternion(
+        new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), up)
+      );
+      ent.initialised = true;
     }
 
-    if (ent.ring) {
-      ent.ring.position.copy(pos);
-      ent.ring.lookAt(pos.clone().add(up));
-      ent.ring.position.add(up.clone().multiplyScalar(-0.05));
-      ent.ring.material.opacity = client.selectedIds.includes(sd.id) ? 0.65 : 0;
+    // Damage flash: trigger when hp drops
+    if (ent.prevHp !== undefined && sd.hp < ent.prevHp) {
+      ent.flashTime = 0.35;
     }
+    ent.prevHp = sd.hp;
 
+    // HP bar values (position handled in gameLoop)
     if (ent.hpBarGroup && sd.maxHp) {
-      const hpPos = posOnSurface(n, sd.isBuilding ? 0.42 : 0.30);
-      ent.hpBarGroup.position.copy(hpPos);
-      ent.hpBarGroup.lookAt(camera.position);
       const ratio = Math.max(0, sd.hp / sd.maxHp);
       ent.hpFill.scale.x = ratio;
       ent.hpFill.position.x = -(1 - ratio) * 0.17;
@@ -943,7 +951,7 @@ function applyState(stateMsg) {
   for (const ev of (stateMsg.events || [])) {
     if (ev.type === 'explosion')      spawnExplosion(ev.pos, false);
     if (ev.type === 'nuke_explosion') spawnExplosion(ev.pos, true);
-    if (ev.type === 'projectile')     spawnProjectile(ev.from, ev.to, ev.faction);
+    if (ev.type === 'projectile')     spawnProjectile(ev.from, ev.to, ev.faction, ev.unitType);
   }
 
   // Update resources HUD
@@ -1012,14 +1020,66 @@ function spawnExplosion(pos, isNuke) {
 
 const projectiles = [];
 
-function spawnProjectile(from, to, faction) {
-  const isNuke = false; // visual distinction can be added later
-  const geo  = new THREE.SphereGeometry(0.035, 4, 4);
+const MISSILE_TYPES = new Set(['rocket', 'nuke', 'silo', 'airplane']);
+const HEAVY_TYPES   = new Set(['tank', 'boat', 'turret']);
+
+function spawnProjectile(from, to, faction, unitType) {
+  const isMissile = MISSILE_TYPES.has(unitType);
+  const isHeavy   = HEAVY_TYPES.has(unitType);
   const color = FACTION_COLORS[faction]?.main || 0xffffff;
-  const mesh  = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color }));
-  mesh.position.copy(posOnSurface(from, 0.18));
-  globeGroup.add(mesh);
-  projectiles.push({ mesh, start: posOnSurface(from, 0.18), end: posOnSurface(to, 0.18), t: 0 });
+
+  let projectileMesh;
+  if (isMissile) {
+    // Nose + body missile shape
+    const g = new THREE.Group();
+    g.add(Object.assign(new THREE.Mesh(
+      new THREE.CylinderGeometry(0.016, 0.016, 0.20, 6),
+      new THREE.MeshBasicMaterial({ color })
+    )));
+    const nose = new THREE.Mesh(
+      new THREE.ConeGeometry(0.016, 0.07, 6),
+      new THREE.MeshBasicMaterial({ color: 0xff5500 })
+    );
+    nose.position.y = 0.135;
+    g.add(nose);
+    // Exhaust glow
+    const exhaust = new THREE.Mesh(
+      new THREE.ConeGeometry(0.016, 0.05, 6),
+      new THREE.MeshBasicMaterial({ color: 0xffaa00 })
+    );
+    exhaust.position.y = -0.125;
+    exhaust.rotation.x = Math.PI;
+    g.add(exhaust);
+    projectileMesh = g;
+  } else if (isHeavy) {
+    projectileMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.055, 6, 6),
+      new THREE.MeshBasicMaterial({ color })
+    );
+  } else {
+    // Tiny elongated bullet
+    const g = new THREE.Group();
+    g.add(new THREE.Mesh(
+      new THREE.CylinderGeometry(0.010, 0.010, 0.07, 5),
+      new THREE.MeshBasicMaterial({ color })
+    ));
+    projectileMesh = g;
+  }
+
+  const startPos = posOnSurface(from, 0.20);
+  const endPos   = posOnSurface(to,   0.20);
+  const dist = startPos.distanceTo(endPos);
+
+  projectileMesh.position.copy(startPos);
+  globeGroup.add(projectileMesh);
+
+  projectiles.push({
+    mesh: projectileMesh,
+    start: startPos, end: endPos, t: 0,
+    arcHeight: isMissile ? Math.max(1.0, dist * 0.55) : (isHeavy ? Math.max(0.25, dist * 0.18) : Math.max(0.12, dist * 0.10)),
+    speed: isMissile ? 1.8 : (isHeavy ? 3.2 : 5.5),
+    isMissile,
+  });
 }
 
 function updateParticlesAndProjectiles(dt) {
@@ -1033,11 +1093,25 @@ function updateParticlesAndProjectiles(dt) {
   }
   for (let i = projectiles.length - 1; i >= 0; i--) {
     const p = projectiles[i];
-    p.t += dt * 3.5;
+    p.t += dt * p.speed;
     if (p.t >= 1) { globeGroup.remove(p.mesh); projectiles.splice(i, 1); continue; }
-    p.mesh.position.lerpVectors(p.start, p.end, p.t);
-    const arcN = p.mesh.position.clone().normalize();
-    p.mesh.position.add(arcN.multiplyScalar(Math.sin(p.t * Math.PI) * 0.35));
+
+    // Position along arc
+    const basePos = new THREE.Vector3().lerpVectors(p.start, p.end, p.t);
+    const arcN    = basePos.clone().normalize();
+    const arcBump = Math.sin(p.t * Math.PI) * p.arcHeight;
+    p.mesh.position.copy(basePos).add(arcN.multiplyScalar(arcBump));
+
+    // Orient along velocity direction
+    // v(t) = (end - start) + arcN * cos(t*PI) * arcHeight * PI
+    const travelDir = p.end.clone().sub(p.start);
+    const arcDeriv  = arcN.clone().multiplyScalar(Math.cos(p.t * Math.PI) * p.arcHeight * Math.PI);
+    const velocity  = travelDir.clone().add(arcDeriv).normalize();
+    if (velocity.lengthSq() > 0.001) {
+      p.mesh.setRotationFromQuaternion(
+        new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), velocity)
+      );
+    }
   }
 }
 
@@ -1296,6 +1370,73 @@ function sendCommand(cmd) {
     client.ws.send(JSON.stringify({ type: 'command', ...cmd }));
 }
 
+// ── Entity per-frame update: interpolation, facing, effects ──
+function updateEntities(dt) {
+  const now = performance.now();
+  client.entities.forEach((ent, id) => {
+    const sd = ent.serverData;
+    if (!sd || !ent.targetPos || !ent.targetUp) return;
+    const up = ent.targetUp;
+
+    // ── Smooth interpolation for mobile units ──
+    if (!sd.isBuilding && sd.type !== 'resource') {
+      const prevPos = ent.mesh.position.clone();
+      ent.mesh.position.lerp(ent.targetPos, 0.22);
+
+      // Face direction of movement
+      const delta = ent.mesh.position.clone().sub(prevPos);
+      if (delta.lengthSq() > 1e-9) {
+        // Project movement onto tangent plane (remove up component)
+        const upDot  = delta.dot(up);
+        const forward = delta.clone().sub(up.clone().multiplyScalar(upDot)).normalize();
+        if (forward.lengthSq() > 0.001) {
+          // right = cross(forward, up) gives correct right-hand orientation
+          const right = new THREE.Vector3().crossVectors(forward, up).normalize();
+          ent.mesh.setRotationFromMatrix(new THREE.Matrix4().makeBasis(forward, up, right));
+        }
+      }
+    }
+
+    // ── Resource bobbing & spin ──
+    if (sd.type === 'resource') {
+      const bob = Math.sin(now * 0.0014 + id * 2.1) * 0.055;
+      ent.mesh.position.copy(ent.targetPos).add(up.clone().multiplyScalar(bob));
+      ent.mesh.rotation.y += dt * 1.5;
+    }
+
+    // ── Selection ring: follow mesh + pulse ──
+    if (ent.ring) {
+      const isSelected = client.selectedIds.includes(id);
+      ent.ring.position.copy(ent.mesh.position).add(up.clone().multiplyScalar(-0.05));
+      ent.ring.lookAt(ent.ring.position.clone().add(up));
+      ent.ring.material.opacity = isSelected
+        ? 0.38 + Math.sin(now * 0.007) * 0.27
+        : 0;
+    }
+
+    // ── HP bar: follow mesh ──
+    if (ent.hpBarGroup && sd.maxHp) {
+      const barOffset = sd.isBuilding ? 0.42 : 0.28;
+      ent.hpBarGroup.position.copy(ent.mesh.position).add(up.clone().multiplyScalar(barOffset));
+      ent.hpBarGroup.lookAt(camera.position);
+    }
+
+    // ── Damage flash ──
+    if (ent.flashTime > 0) {
+      ent.flashTime -= dt;
+      const fi = Math.max(0, ent.flashTime / 0.35);
+      ent.mesh.traverse(child => {
+        if (child.isMesh && child.material) child.material.emissiveIntensity = 0.3 + fi * 2.2;
+      });
+      if (ent.flashTime <= 0) {
+        ent.mesh.traverse(child => {
+          if (child.isMesh && child.material) child.material.emissiveIntensity = 0.3;
+        });
+      }
+    }
+  });
+}
+
 // ── Game Loop ──
 let lastTime = performance.now();
 
@@ -1307,6 +1448,7 @@ function gameLoop() {
 
   updateCamera();
   updateParticlesAndProjectiles(dt);
+  updateEntities(dt);
 
   // Slowly rotate clouds
   if (cloudMesh) cloudMesh.rotation.y += dt * 0.015;

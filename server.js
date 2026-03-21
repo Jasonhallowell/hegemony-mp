@@ -170,6 +170,26 @@ function canTraverse(pos, entity) {
   if (entity.isNaval) return isWater(pos);
   return !isWater(pos);
 }
+// Find a valid spawn point near anchorPos matching terrain type
+function findValidSpawn(anchorPos, isNaval, isAir) {
+  if (isAir) return normalize(lerpVec(randomSurfacePoint(), anchorPos, 0.88 + Math.random() * 0.07));
+  for (let i = 0; i < 120; i++) {
+    const blend = 0.75 + Math.random() * 0.20;
+    const candidate = normalize(lerpVec(randomSurfacePoint(), anchorPos, blend));
+    if (isNaval ? isWater(candidate) : !isWater(candidate)) return candidate;
+  }
+  return normalize(anchorPos);
+}
+// Find a valid land starting position near an approximate location
+function findStartBase(approxPos) {
+  const n = normalize(approxPos);
+  for (let i = 0; i < 200; i++) {
+    const blend = i < 100 ? (0.88 + Math.random() * 0.10) : (0.60 + Math.random() * 0.35);
+    const candidate = normalize(lerpVec(randomSurfacePoint(), n, blend));
+    if (!isWater(candidate)) return candidate;
+  }
+  return n;
+}
 
 // ── Game Room ──
 class GameRoom {
@@ -227,15 +247,15 @@ class GameRoom {
   }
 
   initEntities() {
-    const p1Start = normalize({ x: 0, y: 0.3, z: 1 });
+    const p1Start = findStartBase({ x: 0, y: 0.3, z: 1 });
     this.spawnEntity('base', p1Start, 1);
     for (let i = 0; i < 3; i++)
-      this.spawnEntity('worker', normalize(lerpVec(randomSurfacePoint(), p1Start, 0.92)), 1);
+      this.spawnEntity('worker', findValidSpawn(p1Start, false, false), 1);
 
-    const p2Start = normalize({ x: 0, y: -0.3, z: -1 });
+    const p2Start = findStartBase({ x: 0, y: -0.3, z: -1 });
     this.spawnEntity('base', p2Start, 2);
     for (let i = 0; i < 3; i++)
-      this.spawnEntity('worker', normalize(lerpVec(randomSurfacePoint(), p2Start, 0.92)), 2);
+      this.spawnEntity('worker', findValidSpawn(p2Start, false, false), 2);
 
     // Resource nodes — more variety
     for (let i = 0; i < 28; i++) {
@@ -360,7 +380,7 @@ class GameRoom {
 
         player.minerals -= def.cost.minerals || 0;
         player.energy  -= def.cost.energy  || 0;
-        const offset = normalize(lerpVec(randomSurfacePoint(), spawnAnchor.pos, 0.93));
+        const offset = findValidSpawn(spawnAnchor.pos, def.isNaval || false, def.isAir || false);
         this.spawnEntity(cmd.unitType, offset, player.faction);
         this.sendTo(playerId, { type: 'notify', msg: `${def.name} deployed` });
         break;
@@ -499,7 +519,7 @@ class GameRoom {
             e.attackCooldown = e.attackSpeed || 1;
             if (e.isNuke) { this.nukeDetonation(e); continue; }
             tgt.hp -= e.attack;
-            this.events.push({ type: 'projectile', from: { ...e.pos }, to: { ...tgt.pos }, faction: e.faction });
+            this.events.push({ type: 'projectile', from: { ...e.pos }, to: { ...tgt.pos }, faction: e.faction, unitType: e.type });
             if (tgt.hp <= 0) { this.destroyEntity(tgt); e.attackTarget = null; e.target = null; }
           }
         } else if (!e.isBuilding) {
