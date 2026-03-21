@@ -396,78 +396,84 @@ function posOnSurface(n, offset = 0.15) {
 let globeMesh;
 let cloudMesh;
 
+const WATER_H = -0.10; // must match server WATER_H
+
+function triHeight(nx, ny, nz) {
+  const s = 2.5;
+  return fbmNoise(nx*s, ny*s, nz*s)*0.30 +
+         fbmNoise(nx*s*2+5, ny*s*2+5, nz*s*2+5)*0.15 +
+         fbmNoise(nx*s*4+10, ny*s*4+10, nz*s*4+10)*0.07;
+}
+
 function createGlobe() {
-  const geo = new THREE.IcosahedronGeometry(GLOBE_RADIUS, 6);
+  // toNonIndexed: each triangle gets its own 3 vertices → per-face flat shading + per-face color
+  const geo = new THREE.IcosahedronGeometry(GLOBE_RADIUS, 5).toNonIndexed();
   const pos = geo.attributes.position;
   const colors = [];
 
-  for (let i = 0; i < pos.count; i++) {
-    const v = new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
-    const n = v.clone().normalize();
-    const s = 2.5;
-    let height = 0;
-    height += fbmNoise(n.x*s,     n.y*s,     n.z*s    )*0.30;
-    height += fbmNoise(n.x*s*2+5, n.y*s*2+5, n.z*s*2+5)*0.15;
-    height += fbmNoise(n.x*s*4+10,n.y*s*4+10,n.z*s*4+10)*0.07;
-    const r2 = GLOBE_RADIUS + height;
-    v.copy(n).multiplyScalar(r2);
-    pos.setXYZ(i, v.x, v.y, v.z);
+  for (let t = 0; t < pos.count; t += 3) {
+    // Read the 3 vertex normals (pre-displacement they're just normalized positions)
+    const verts = [];
+    for (let k = 0; k < 3; k++) {
+      const rx = pos.getX(t+k), ry = pos.getY(t+k), rz = pos.getZ(t+k);
+      const len = Math.sqrt(rx*rx + ry*ry + rz*rz);
+      verts.push({ nx: rx/len, ny: ry/len, nz: rz/len });
+    }
 
-    // Biome coloring
-    const lat = Math.abs(n.y);
-    const heatNoise = fbmNoise(n.x*3+20, n.y*3+20, n.z*3+20);
+    // Triangle-average height decides water vs land — sharp triangle-edge boundaries
+    const h0 = triHeight(verts[0].nx, verts[0].ny, verts[0].nz);
+    const h1 = triHeight(verts[1].nx, verts[1].ny, verts[1].nz);
+    const h2 = triHeight(verts[2].nx, verts[2].ny, verts[2].nz);
+    const avgH = (h0 + h1 + h2) / 3;
+    const isWaterTri = avgH < WATER_H;
+
+    // Displace vertices: water pushed below ocean sphere, land displaced by noise
+    for (let k = 0; k < 3; k++) {
+      const { nx, ny, nz } = verts[k];
+      const h = [h0, h1, h2][k];
+      const r = isWaterTri ? GLOBE_RADIUS - 0.15 : GLOBE_RADIUS + h;
+      pos.setXYZ(t+k, nx*r, ny*r, nz*r);
+    }
+
+    // Single flat color per triangle (no gradient blending — clean triangle edges)
+    const midNy = (verts[0].ny + verts[1].ny + verts[2].ny) / 3;
+    const lat = Math.abs(midNy);
+    const hn = verts[0];
+    const heatN = fbmNoise(hn.nx*3+20, hn.ny*3+20, hn.nz*3+20);
     let c;
 
-    if (lat > 0.85) {
-      // Polar ice
-      c = new THREE.Color(0xd8eef5).lerp(new THREE.Color(0xffffff), (lat - 0.85) / 0.15);
-    } else if (height < -0.12) {
-      // Deep ocean
-      c = new THREE.Color(0x0a2035);
-    } else if (height < -0.02) {
-      // Shallow ocean
-      c = new THREE.Color(0x1a4a7a).lerp(new THREE.Color(0x2a6aaa), (height + 0.12) / 0.10);
-    } else if (height < 0.03) {
-      // Beach / sand
-      c = new THREE.Color(0xc8b870).lerp(new THREE.Color(0xd4c890), (height + 0.02) / 0.05);
-    } else if (height < 0.10) {
-      // Lowland: desert near equator, grass otherwise
-      const isDesert = lat < 0.38 && heatNoise > 0.05;
-      if (isDesert) {
-        c = new THREE.Color(0xd49030).lerp(new THREE.Color(0xc8a860), (height - 0.03) / 0.07);
-      } else {
-        c = new THREE.Color(0x5a8a48).lerp(new THREE.Color(0x6ea050), (height - 0.03) / 0.07);
-      }
-    } else if (height < 0.20) {
-      // Forest / highland
-      const isDesert = lat < 0.35 && heatNoise > 0.08;
-      if (isDesert) {
-        c = new THREE.Color(0xb87830).lerp(new THREE.Color(0x907050), (height - 0.10) / 0.10);
-      } else {
-        c = new THREE.Color(0x3a6830).lerp(new THREE.Color(0x706048), (height - 0.10) / 0.10);
-      }
-    } else if (height < 0.30) {
-      // Rocky mountain
-      c = new THREE.Color(0x706048).lerp(new THREE.Color(0x909090), (height - 0.20) / 0.10);
+    if (isWaterTri) {
+      c = avgH < -0.20 ? new THREE.Color(0x0a1e32) : new THREE.Color(0x18406e);
+    } else if (lat > 0.82) {
+      c = new THREE.Color(0xe8f2f8);
+    } else if (avgH < WATER_H + 0.08) {
+      c = new THREE.Color(0xc4b468); // beach
+    } else if (avgH < 0.10) {
+      c = lat < 0.38 && heatN > 0.05 ? new THREE.Color(0xcc8828) : new THREE.Color(0x588040);
+    } else if (avgH < 0.20) {
+      c = lat < 0.35 && heatN > 0.08 ? new THREE.Color(0xb07028) : new THREE.Color(0x386028);
+    } else if (avgH < 0.30) {
+      c = new THREE.Color(0x787060);
     } else {
-      // Snow peaks
-      c = new THREE.Color(0xb8c8d0).lerp(new THREE.Color(0xeef2f5), (height - 0.30) / 0.15);
+      c = new THREE.Color(0xe8f0f4);
     }
-    colors.push(c.r, c.g, c.b);
+
+    for (let k = 0; k < 3; k++) colors.push(c.r, c.g, c.b);
   }
 
   geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  geo.computeVertexNormals();
-  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78, metalness: 0.05 });
-  globeMesh = new THREE.Mesh(geo, mat);
+  geo.computeVertexNormals(); // flat normals per face → faceted low-poly look
+  globeMesh = new THREE.Mesh(geo,
+    new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.04 })
+  );
   globeMesh.castShadow = true;
   globeMesh.receiveShadow = true;
   globeGroup.add(globeMesh);
 
-  // Ocean sphere
+  // Ocean fill sphere — sits above pushed-down water triangles, gives them a water sheen
   globeGroup.add(new THREE.Mesh(
-    new THREE.SphereGeometry(GLOBE_RADIUS - 0.03, 48, 48),
-    new THREE.MeshStandardMaterial({ color: 0x1a4a7a, roughness: 0.1, metalness: 0.35, transparent: true, opacity: 0.82 })
+    new THREE.SphereGeometry(GLOBE_RADIUS - 0.06, 48, 48),
+    new THREE.MeshStandardMaterial({ color: 0x1a4878, roughness: 0.08, metalness: 0.4, transparent: true, opacity: 0.88 })
   ));
 
   // Atmosphere glow
@@ -483,7 +489,7 @@ function createGlobe() {
   // Cloud layer
   cloudMesh = new THREE.Mesh(
     new THREE.SphereGeometry(GLOBE_RADIUS * 1.05, 36, 36),
-    new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, roughness: 1.0, depthWrite: false })
+    new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.10, roughness: 1.0, depthWrite: false })
   );
   globeGroup.add(cloudMesh);
 }

@@ -165,20 +165,21 @@ function getTerrainH(pos) {
          fbmNoise(n.x*s*2+5, n.y*s*2+5, n.z*s*2+5)*0.15 +
          fbmNoise(n.x*s*4+10, n.y*s*4+10, n.z*s*4+10)*0.07;
 }
-function isWater(pos)  { return getTerrainH(pos) < -0.02; }
+const WATER_H = -0.10; // higher threshold = less water, bigger land masses
+function isWater(pos)  { return getTerrainH(pos) < WATER_H; }
 function canTraverse(pos, entity) {
   if (entity.isAir) return true;
   const h = getTerrainH(pos);
-  if (entity.isNaval) return h < -0.02;
-  return h > 0.0; // small coast-buffer: keeps land units off the visual shoreline
+  if (entity.isNaval) return h < WATER_H;
+  return h > 0.0; // land units stay well above sea level
 }
 // Find a valid spawn point near anchorPos matching terrain type
 function findValidSpawn(anchorPos, isNaval, isAir) {
   if (isAir) return normalize(lerpVec(randomSurfacePoint(), anchorPos, 0.88 + Math.random() * 0.07));
-  for (let i = 0; i < 120; i++) {
-    const blend = 0.75 + Math.random() * 0.20;
+  for (let i = 0; i < 200; i++) {
+    const blend = 0.75 + Math.random() * 0.22;
     const candidate = normalize(lerpVec(randomSurfacePoint(), anchorPos, blend));
-    if (isNaval ? isWater(candidate) : !isWater(candidate)) return candidate;
+    if (isNaval ? getTerrainH(candidate) < WATER_H : getTerrainH(candidate) > 0.0) return candidate;
   }
   return normalize(anchorPos);
 }
@@ -214,10 +215,10 @@ function bestValidStep(current, target, entity, prevDir, step) {
 // Find a valid land starting position near an approximate location
 function findStartBase(approxPos) {
   const n = normalize(approxPos);
-  for (let i = 0; i < 200; i++) {
-    const blend = i < 100 ? (0.88 + Math.random() * 0.10) : (0.60 + Math.random() * 0.35);
+  for (let i = 0; i < 300; i++) {
+    const blend = i < 150 ? (0.85 + Math.random() * 0.12) : (0.50 + Math.random() * 0.45);
     const candidate = normalize(lerpVec(randomSurfacePoint(), n, blend));
-    if (!isWater(candidate)) return candidate;
+    if (getTerrainH(candidate) > 0.05) return candidate; // well above sea level
   }
   return n;
 }
@@ -636,6 +637,21 @@ class GameRoom {
           }
         } else if (!e.isBuilding) {
           e.target = { ...tgt.pos };
+        }
+      }
+    }
+
+    // ── Unit Separation (prevent overlap) ──
+    const mobile = this.entities.filter(e => e.alive && !e.isBuilding && e.speed > 0);
+    for (const e of mobile) {
+      for (const other of mobile) {
+        if (other.id === e.id) continue;
+        const d = angleBetween(e.pos, other.pos);
+        if (d < 0.055 && d > 0.001) {
+          const force = (0.055 - d) * 1.5 * dt;
+          const pv = normalize({ x: e.pos.x-other.pos.x, y: e.pos.y-other.pos.y, z: e.pos.z-other.pos.z });
+          const cand = normalize({ x: e.pos.x+pv.x*force, y: e.pos.y+pv.y*force, z: e.pos.z+pv.z*force });
+          if (canTraverse(cand, e)) e.pos = cand;
         }
       }
     }
