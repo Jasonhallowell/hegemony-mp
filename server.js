@@ -22,6 +22,7 @@ const TICK_MS = 1000 / TICK_RATE;
 
 // ── Age System ──
 const AGE_NAMES = ['Stone Age', 'Industrial Age', 'Modern Age', 'Space Age'];
+const BUILD_TIMES = { outpost: 12, turret: 8, dock: 15, silo: 20 };
 const AGE_ADVANCE_COST = [
   null,
   { minerals: 600,  energy: 300  },
@@ -180,6 +181,22 @@ function findValidSpawn(anchorPos, isNaval, isAir) {
   }
   return normalize(anchorPos);
 }
+// Steer around terrain obstacles by rotating the movement axis around the surface normal
+function findValidMoveDirection(current, target, entity) {
+  const surfNormal = current; // already normalized
+  const directAx = normalize(cross(current, target));
+  if (directAx.x === 0 && directAx.y === 0 && directAx.z === 0) return null;
+  for (let step = 1; step <= 13; step++) {
+    const angle = step * (Math.PI / 18); // 10° per step, up to 130°
+    for (const sign of [1, -1]) {
+      const rotAx = normalize(applyAxisAngle(directAx, surfNormal, angle * sign));
+      const candidate = normalize(applyAxisAngle(current, rotAx, 0.015));
+      if (canTraverse(candidate, entity)) return rotAx;
+    }
+  }
+  return null;
+}
+
 // Find a valid land starting position near an approximate location
 function findStartBase(approxPos) {
   const n = normalize(approxPos);
@@ -289,7 +306,7 @@ class GameRoom {
       isNuke: def.isNuke || false,
       nukeRadius: def.nukeRadius || 0,
       target: null, attackTarget: null, gatherTarget: null,
-      gathering: false, gatherCooldown: 0,
+      gathering: false, gatherCooldown: 0, constructTarget: null,
       alive: true, name: def.name,
     };
     this.entities.push(entity);
@@ -317,6 +334,7 @@ class GameRoom {
             u.attackTarget = null;
             u.gatherTarget = null;
             u.gathering = false;
+            u.constructTarget = null;
           }
         }
         break;
@@ -395,10 +413,37 @@ class GameRoom {
         if (player.minerals < (def.cost?.minerals || 0) || player.energy < (def.cost?.energy || 0)) {
           this.sendTo(playerId, { type: 'notify', msg: 'Insufficient resources!' }); break;
         }
+        // Validate workers
+        const workerIds = (cmd.workerIds || []).filter(wid => {
+          const w = this.entities.find(e => e.id === wid && e.type === 'worker' && e.faction === player.faction && e.alive);
+          return !!w;
+        });
+        if (workerIds.length === 0) {
+          this.sendTo(playerId, { type: 'notify', msg: 'Select a Worker to build!' }); break;
+        }
         player.minerals -= def.cost.minerals || 0;
-        player.energy  -= def.cost.energy  || 0;
-        this.spawnEntity(cmd.structType, normalize(cmd.pos), player.faction);
-        this.sendTo(playerId, { type: 'notify', msg: `${def.name} constructed` });
+        player.energy   -= def.cost.energy   || 0;
+        const buildPos = normalize(cmd.pos);
+        const site = {
+          id: this.nextEntityId++, type: 'site',
+          buildType: cmd.structType, buildProgress: 0,
+          buildTime: BUILD_TIMES[cmd.structType] || 12,
+          pos: buildPos, faction: player.faction,
+          hp: def.hp, maxHp: def.hp,
+          attack: 0, range: 0, speed: 0,
+          isBuilding: true, isAir: false, isNaval: false, isNuke: false, nukeRadius: 0,
+          popCost: 0, alive: true, name: `${def.name} (constructing)`,
+        };
+        this.entities.push(site);
+        for (const wid of workerIds) {
+          const w = this.entities.find(e => e.id === wid);
+          if (w) {
+            w.constructTarget = site.id;
+            w.target = { ...buildPos };
+            w.gatherTarget = null; w.attackTarget = null; w.gathering = false;
+          }
+        }
+        this.sendTo(playerId, { type: 'notify', msg: `${def.name} construction started` });
         break;
       }
 
@@ -459,9 +504,19 @@ class GameRoom {
         if (dist > 0.015) {
           const ax = normalize(cross(current, target));
           if (ax.x === 0 && ax.y === 0 && ax.z === 0) continue;
-          const newPos = normalize(applyAxisAngle(current, ax, Math.min(e.speed * dt * 0.1, dist)));
-          if (!canTraverse(newPos, e)) { e.target = null; continue; }
-          e.pos = newPos;
+          const step = Math.min(e.speed * dt * 0.1, dist);
+          const newPos = normalize(applyAxisAngle(current, ax, step));
+          if (!canTraverse(newPos, e)) {
+            // Try to steer around the obstacle
+            const steerAx = findValidMoveDirection(current, target, e);
+            if (steerAx) {
+              const steerPos = normalize(applyAxisAngle(current, steerAx, step));
+              if (canTraverse(steerPos, e)) e.pos = steerPos;
+            }
+            // else: can't move this tick, but keep target so we keep trying
+          } else {
+            e.pos = newPos;
+          }
         } else {
           // Arrived
           if (e.isNuke) { this.nukeDetonation(e); continue; }
@@ -491,6 +546,31 @@ class GameRoom {
             }
             if (res.amount <= 0) { res.alive = false; e.gathering = false; e.gatherTarget = null; }
           } else { e.gathering = false; e.gatherTarget = null; }
+        }
+      }
+
+      // ── Construction ──
+      if (e.constructTarget != null && e.type === 'worker') {
+        const site = this.entities.find(s => s.id === e.constructTarget && s.type === 'site' && s.alive);
+        if (!site) {
+          e.constructTarget = null;
+        } else {
+          const dist = angleBetween(e.pos, site.pos) * GLOBE_RADIUS;
+          if (dist < 0.35) {
+            e.target = null; // stop moving, start building
+            site.buildProgress = (site.buildProgress || 0) + dt;
+            if (site.buildProgress >= site.buildTime) {
+              this.spawnEntity(site.buildType, site.pos, site.faction);
+              site.alive = false;
+              const siteId = site.id;
+              for (const w of this.entities) {
+                if (w.constructTarget === siteId) w.constructTarget = null;
+              }
+              this.events.push({ type: 'build_complete', pos: { ...site.pos } });
+            }
+          } else {
+            e.target = { ...site.pos }; // keep walking toward site
+          }
         }
       }
 
@@ -544,6 +624,11 @@ class GameRoom {
       this.broadcast({ type: 'gameOver', winner, loser: entity.faction });
       setTimeout(() => this.stop(), 3000);
     }
+    if (entity.type === 'site') {
+      for (const w of this.entities) {
+        if (w.constructTarget === entity.id) w.constructTarget = null;
+      }
+    }
   }
 
   broadcastState() {
@@ -556,6 +641,7 @@ class GameRoom {
         name: e.name,
         resourceType: e.resourceType, amount: e.amount, maxAmount: e.maxAmount,
         gathering: e.gathering, attack: e.attack, range: e.range, gatherRate: e.gatherRate,
+        buildType: e.buildType, buildProgress: e.buildProgress, buildTime: e.buildTime,
       }));
 
     const playerStates = {};

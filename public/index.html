@@ -314,6 +314,7 @@ const client = {
   entities: new Map(),
   selectedIds: [],
   placingBuilding: null,
+  placingWorkerIds: [],
   notifyTimer: 0,
 };
 
@@ -491,6 +492,7 @@ createGlobe();
 
 // ── Camera Controls ──
 let isDragging = false, prevMouse = { x: 0, y: 0 };
+let rightDragStart = { x: 0, y: 0 }, rightDragMoved = false;
 let cameraTheta = 0, cameraPhi = Math.PI / 3, cameraDistance = 14;
 
 function updateCamera() {
@@ -502,16 +504,25 @@ function updateCamera() {
   camera.lookAt(0, 0, 0);
 }
 
-canvas.addEventListener('mousedown', e => { if (e.button === 0) { isDragging = true; prevMouse = {x: e.clientX, y: e.clientY}; } });
-canvas.addEventListener('mousemove', e => {
-  // Only orbit camera if not drag-selecting units
-  if (isDragging && !dragSelecting) {
-    cameraTheta -= (e.clientX - prevMouse.x) * 0.005;
-    cameraPhi = Math.max(0.3, Math.min(Math.PI - 0.3, cameraPhi + (e.clientY - prevMouse.y) * 0.005));
-    prevMouse = {x: e.clientX, y: e.clientY};
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 2) {
+    isDragging = true; rightDragMoved = false;
+    rightDragStart = { x: e.clientX, y: e.clientY };
+    prevMouse = { x: e.clientX, y: e.clientY };
   }
 });
-canvas.addEventListener('mouseup', () => isDragging = false);
+canvas.addEventListener('mousemove', e => {
+  if (isDragging) {
+    const dx = e.clientX - rightDragStart.x, dy = e.clientY - rightDragStart.y;
+    if (Math.sqrt(dx*dx + dy*dy) > 4) rightDragMoved = true;
+    if (rightDragMoved) {
+      cameraTheta -= (e.clientX - prevMouse.x) * 0.005;
+      cameraPhi = Math.max(0.3, Math.min(Math.PI - 0.3, cameraPhi + (e.clientY - prevMouse.y) * 0.005));
+      prevMouse = { x: e.clientX, y: e.clientY };
+    }
+  }
+});
+canvas.addEventListener('mouseup', e => { if (e.button === 2) isDragging = false; });
 canvas.addEventListener('wheel', e => { cameraDistance = Math.max(7, Math.min(28, cameraDistance + e.deltaY * 0.012)); });
 
 // ── Raycasting ──
@@ -856,6 +867,34 @@ function getOrCreateVisual(id, sd) {
     ent.mesh = new THREE.Mesh(geo, mat);
     ent.mesh.userData.entityId = id;
     globeGroup.add(ent.mesh);
+  } else if (sd.type === 'site') {
+    // Ghost translucent model of the building being constructed
+    const group = buildModel(sd.buildType, fc);
+    group.traverse(child => {
+      if (child.isMesh && child.material) {
+        child.material = child.material.clone();
+        child.material.transparent = true;
+        child.material.opacity = 0.35;
+        child.material.depthWrite = false;
+      }
+    });
+    group.userData.entityId = id;
+    ent.mesh = group;
+    globeGroup.add(group);
+    // Progress bar for construction
+    const hpG = new THREE.Group();
+    hpG.add(new THREE.Mesh(
+      new THREE.PlaneGeometry(0.34, 0.045),
+      new THREE.MeshBasicMaterial({ color: 0x222200, transparent: true, opacity: 0.7, side: THREE.DoubleSide, depthTest: false })
+    ));
+    ent.hpFill = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.34, 0.045),
+      new THREE.MeshBasicMaterial({ color: 0xffd740, side: THREE.DoubleSide, depthTest: false })
+    );
+    hpG.add(ent.hpFill);
+    hpG.visible = true;
+    ent.hpBarGroup = hpG;
+    globeGroup.add(hpG);
   } else {
     // Build composite model
     const group = buildModel(sd.type, fc);
@@ -920,8 +959,8 @@ function applyState(stateMsg) {
     ent.targetPos = pos;
     ent.targetUp  = up;
 
-    // Snap buildings/resources immediately (they don't move)
-    if (sd.isBuilding || sd.type === 'resource') {
+    // Snap buildings/resources/sites immediately (they don't move)
+    if (sd.isBuilding || sd.type === 'resource' || sd.type === 'site') {
       ent.mesh.position.copy(pos);
       if (sd.isBuilding) {
         ent.mesh.setRotationFromQuaternion(
@@ -943,12 +982,19 @@ function applyState(stateMsg) {
     }
     ent.prevHp = sd.hp;
 
-    // HP bar values (position handled in gameLoop)
-    if (ent.hpBarGroup && sd.maxHp) {
-      const ratio = Math.max(0, sd.hp / sd.maxHp);
-      ent.hpFill.scale.x = ratio;
-      ent.hpFill.position.x = -(1 - ratio) * 0.17;
-      ent.hpBarGroup.visible = client.selectedIds.includes(sd.id) || sd.hp < sd.maxHp;
+    // HP bar / progress bar values (position handled in gameLoop)
+    if (ent.hpBarGroup) {
+      if (sd.type === 'site' && sd.buildTime) {
+        const ratio = Math.max(0, Math.min(1, (sd.buildProgress || 0) / sd.buildTime));
+        ent.hpFill.scale.x = ratio;
+        ent.hpFill.position.x = -(1 - ratio) * 0.17;
+        ent.hpBarGroup.visible = true;
+      } else if (sd.maxHp) {
+        const ratio = Math.max(0, sd.hp / sd.maxHp);
+        ent.hpFill.scale.x = ratio;
+        ent.hpFill.position.x = -(1 - ratio) * 0.17;
+        ent.hpBarGroup.visible = client.selectedIds.includes(sd.id) || sd.hp < sd.maxHp;
+      }
     }
   }
 
@@ -962,6 +1008,7 @@ function applyState(stateMsg) {
     if (ev.type === 'explosion')      spawnExplosion(ev.pos, false);
     if (ev.type === 'nuke_explosion') spawnExplosion(ev.pos, true);
     if (ev.type === 'projectile')     spawnProjectile(ev.from, ev.to, ev.faction, ev.unitType);
+    if (ev.type === 'build_complete') spawnBuildComplete(ev.pos);
   }
 
   // Update resources HUD
@@ -1026,6 +1073,27 @@ function spawnExplosion(pos, isNuke) {
       requestAnimationFrame(animRing);
     })();
   }
+}
+
+function spawnBuildComplete(pos) {
+  // Flash ring + particles to indicate building finished
+  const p = posOnSurface(pos, 0.1);
+  const normal = new THREE.Vector3(pos.x, pos.y, pos.z).normalize();
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.04, 0.14, 28),
+    new THREE.MeshBasicMaterial({ color: 0xffd740, transparent: true, opacity: 1.0, side: THREE.DoubleSide, depthTest: false })
+  );
+  ring.position.copy(p);
+  ring.lookAt(p.clone().add(normal));
+  globeGroup.add(ring);
+  const t0 = performance.now();
+  (function anim() {
+    const t = (performance.now() - t0) / 1000;
+    if (t > 0.8) { globeGroup.remove(ring); return; }
+    ring.scale.setScalar(1 + t * 6);
+    ring.material.opacity = 1.0 * (1 - t / 0.8);
+    requestAnimationFrame(anim);
+  })();
 }
 
 const projectiles = [];
@@ -1191,8 +1259,14 @@ canvas.addEventListener('click', e => {
 
   if (client.placingBuilding) {
     const normal = getGlobeNormal(e);
-    if (normal) sendCommand({ action: 'build_structure', structType: client.placingBuilding, pos: {x: normal.x, y: normal.y, z: normal.z} });
+    if (normal) sendCommand({
+      action: 'build_structure',
+      structType: client.placingBuilding,
+      pos: { x: normal.x, y: normal.y, z: normal.z },
+      workerIds: client.placingWorkerIds,
+    });
     client.placingBuilding = null;
+    client.placingWorkerIds = [];
     return;
   }
 
@@ -1227,6 +1301,7 @@ canvas.addEventListener('dblclick', e => {
 
 canvas.addEventListener('contextmenu', e => {
   e.preventDefault();
+  if (rightDragMoved) return; // Was a camera drag, not a command
   if (!client.gameStarted || client.selectedIds.length === 0) return;
 
   const unitIds = client.selectedIds.filter(id => {
@@ -1308,10 +1383,21 @@ document.getElementById('btnAirplane').addEventListener('click', () => { if (cli
 document.getElementById('btnRocket').addEventListener('click',   () => { if (client.gameStarted) sendCommand({ action:'build_unit', unitType:'rocket'   }); });
 document.getElementById('btnNuke').addEventListener('click',     () => { if (client.gameStarted) sendCommand({ action:'build_unit', unitType:'nuke'     }); });
 
-document.getElementById('btnOutpost').addEventListener('click', () => { if (client.gameStarted) { client.placingBuilding = 'outpost'; notify('Click globe to place Outpost'); } });
-document.getElementById('btnTurret').addEventListener('click',  () => { if (client.gameStarted) { client.placingBuilding = 'turret';  notify('Click globe to place Defense Turret'); } });
-document.getElementById('btnDock').addEventListener('click',    () => { if (client.gameStarted) { client.placingBuilding = 'dock';    notify('Click globe to place Dock'); } });
-document.getElementById('btnSilo').addEventListener('click',    () => { if (client.gameStarted) { client.placingBuilding = 'silo';    notify('Click globe to place Missile Silo'); } });
+function startPlacingBuilding(structType, label) {
+  if (!client.gameStarted) return;
+  const workerIds = client.selectedIds.filter(id => {
+    const ent = client.entities.get(id);
+    return ent?.serverData?.type === 'worker' && ent.serverData.faction === client.faction;
+  });
+  if (workerIds.length === 0) { notify('Select a Worker first!'); return; }
+  client.placingBuilding = structType;
+  client.placingWorkerIds = workerIds;
+  notify(`Worker assigned — click globe to place ${label}`);
+}
+document.getElementById('btnOutpost').addEventListener('click', () => startPlacingBuilding('outpost', 'Outpost'));
+document.getElementById('btnTurret').addEventListener('click',  () => startPlacingBuilding('turret',  'Defense Turret'));
+document.getElementById('btnDock').addEventListener('click',    () => startPlacingBuilding('dock',    'Dock'));
+document.getElementById('btnSilo').addEventListener('click',    () => startPlacingBuilding('silo',    'Missile Silo'));
 
 document.getElementById('btnAdvanceAge').addEventListener('click', () => {
   if (client.gameStarted) sendCommand({ action: 'advance_age' });
