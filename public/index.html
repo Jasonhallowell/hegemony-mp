@@ -427,12 +427,13 @@ function createGlobe() {
     const avgH = (h0 + h1 + h2) / 3;
     const isWaterTri = avgH < WATER_H;
 
-    // Displace vertices: water pushed below ocean sphere, land displaced by noise
+    // All triangles sit at their natural terrain height.
+    // Water triangles are flat (use avgH so all 3 verts same radius = flat face).
+    // Land triangles use per-vertex height for terrain relief.
     for (let k = 0; k < 3; k++) {
       const { nx, ny, nz } = verts[k];
-      const h = [h0, h1, h2][k];
-      const r = isWaterTri ? GLOBE_RADIUS - 0.15 : GLOBE_RADIUS + h;
-      pos.setXYZ(t+k, nx*r, ny*r, nz*r);
+      const h = isWaterTri ? avgH : [h0, h1, h2][k];
+      pos.setXYZ(t+k, nx*(GLOBE_RADIUS + h), ny*(GLOBE_RADIUS + h), nz*(GLOBE_RADIUS + h));
     }
 
     // Single flat color per triangle (no gradient blending — clean triangle edges)
@@ -470,11 +471,7 @@ function createGlobe() {
   globeMesh.receiveShadow = true;
   globeGroup.add(globeMesh);
 
-  // Ocean fill sphere — sits above pushed-down water triangles, gives them a water sheen
-  globeGroup.add(new THREE.Mesh(
-    new THREE.SphereGeometry(GLOBE_RADIUS - 0.06, 48, 48),
-    new THREE.MeshStandardMaterial({ color: 0x1a4878, roughness: 0.08, metalness: 0.4, transparent: true, opacity: 0.88 })
-  ));
+  // No ocean sphere — the flat-colored water triangles ARE the water surface
 
   // Atmosphere glow
   globeGroup.add(new THREE.Mesh(
