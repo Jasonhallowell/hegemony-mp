@@ -902,8 +902,8 @@ function applyState(stateMsg) {
     ent.serverData = sd;
 
     const n = sd.pos;
-    // Air units float higher
-    const surfOffset = sd.isAir ? 0.55 : (sd.isBuilding ? 0.14 : 0.12);
+    // Air units float higher, naval units sit low on water
+    const surfOffset = sd.isAir ? 0.55 : sd.isNaval ? 0.06 : (sd.isBuilding ? 0.14 : 0.12);
     const pos = posOnSurface(n, surfOffset);
     ent.mesh.position.copy(pos);
 

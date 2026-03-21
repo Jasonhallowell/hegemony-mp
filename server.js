@@ -67,12 +67,12 @@ const UNIT_DEFS = {
   dock: {
     name: 'Dock', hp: 180, maxHp: 180, isBuilding: true,
     cost: { minerals: 250, energy: 80 },
-    attack: 0, range: 0, minAge: 1,
+    attack: 0, range: 0, minAge: 1, isNaval: true,
   },
   boat: {
     name: 'Warship', hp: 160, maxHp: 160, speed: 0.45, attack: 28, range: 2.8,
     cost: { minerals: 130, energy: 60 }, popCost: 2,
-    attackSpeed: 1.8, isBuilding: false, minAge: 1, spawnFromDock: true,
+    attackSpeed: 1.8, isBuilding: false, minAge: 1, spawnFromDock: true, isNaval: true,
   },
 
   // ── Modern Age (2) ──
@@ -156,6 +156,19 @@ function getSurfaceHeight(n) {
           fbmNoise(n.x*s*2+5, n.y*s*2+5, n.z*s*2+5)*0.15 +
           fbmNoise(n.x*s*4+10, n.y*s*4+10, n.z*s*4+10)*0.07;
   return GLOBE_RADIUS + h;
+}
+function getTerrainH(pos) {
+  const n = normalize(pos);
+  const s = 2.5;
+  return fbmNoise(n.x*s, n.y*s, n.z*s)*0.3 +
+         fbmNoise(n.x*s*2+5, n.y*s*2+5, n.z*s*2+5)*0.15 +
+         fbmNoise(n.x*s*4+10, n.y*s*4+10, n.z*s*4+10)*0.07;
+}
+function isWater(pos)  { return getTerrainH(pos) < -0.02; }
+function canTraverse(pos, entity) {
+  if (entity.isAir) return true;
+  if (entity.isNaval) return isWater(pos);
+  return !isWater(pos);
 }
 
 // ── Game Room ──
@@ -252,6 +265,7 @@ class GameRoom {
       popCost: def.popCost || 0,
       isBuilding: def.isBuilding || false,
       isAir: def.isAir || false,
+      isNaval: def.isNaval || false,
       isNuke: def.isNuke || false,
       nukeRadius: def.nukeRadius || 0,
       target: null, attackTarget: null, gatherTarget: null,
@@ -275,6 +289,10 @@ class GameRoom {
         for (const uid of cmd.unitIds) {
           const u = this.entities.find(e => e.id === uid);
           if (u && u.alive && u.faction === player.faction && !u.isBuilding) {
+            if (!canTraverse(target, u)) {
+              this.sendTo(playerId, { type: 'notify', msg: u.isNaval ? 'Warships can only move on water!' : 'Land units cannot enter water!' });
+              continue;
+            }
             u.target = target;
             u.attackTarget = null;
             u.gatherTarget = null;
@@ -421,7 +439,9 @@ class GameRoom {
         if (dist > 0.015) {
           const ax = normalize(cross(current, target));
           if (ax.x === 0 && ax.y === 0 && ax.z === 0) continue;
-          e.pos = normalize(applyAxisAngle(current, ax, Math.min(e.speed * dt * 0.1, dist)));
+          const newPos = normalize(applyAxisAngle(current, ax, Math.min(e.speed * dt * 0.1, dist)));
+          if (!canTraverse(newPos, e)) { e.target = null; continue; }
+          e.pos = newPos;
         } else {
           // Arrived
           if (e.isNuke) { this.nukeDetonation(e); continue; }
@@ -512,7 +532,7 @@ class GameRoom {
       .map(e => ({
         id: e.id, type: e.type, pos: e.pos, faction: e.faction,
         hp: e.hp, maxHp: e.maxHp,
-        isBuilding: e.isBuilding, isAir: e.isAir,
+        isBuilding: e.isBuilding, isAir: e.isAir, isNaval: e.isNaval,
         name: e.name,
         resourceType: e.resourceType, amount: e.amount, maxAmount: e.maxAmount,
         gathering: e.gathering, attack: e.attack, range: e.range, gatherRate: e.gatherRate,
