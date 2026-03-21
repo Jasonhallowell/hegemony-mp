@@ -181,18 +181,34 @@ function findValidSpawn(anchorPos, isNaval, isAir) {
   }
   return normalize(anchorPos);
 }
-// Steer around terrain obstacles by rotating the movement axis around the surface normal
-function findValidMoveDirection(current, target, entity) {
-  const surfNormal = current; // already normalized
-  const directAx = normalize(cross(current, target));
-  if (directAx.x === 0 && directAx.y === 0 && directAx.z === 0) return null;
-  for (let step = 1; step <= 13; step++) {
-    const angle = step * (Math.PI / 18); // 10° per step, up to 130°
-    for (const sign of [1, -1]) {
-      const rotAx = normalize(applyAxisAngle(directAx, surfNormal, angle * sign));
-      const candidate = normalize(applyAxisAngle(current, rotAx, 0.015));
-      if (canTraverse(candidate, entity)) return rotAx;
-    }
+// Compute forward + right tangent vectors at current toward target
+function getSteerVectors(current, target) {
+  const d = dot(target, current);
+  const fwd = normalize({
+    x: target.x - d * current.x,
+    y: target.y - d * current.y,
+    z: target.z - d * current.z,
+  });
+  const right = normalize(cross(current, fwd));
+  return { fwd, right };
+}
+
+// Try to take a step of `step` radians steered toward `side` (+1/-1) away from direct.
+// Tries angles 10°, 20°, … 170° on that side. Returns new pos if traversable, else null.
+function steerStep(current, target, entity, side, step) {
+  const { fwd, right } = getSteerVectors(current, target);
+  if (fwd.x === 0 && fwd.y === 0 && fwd.z === 0) return null;
+  for (let i = 1; i <= 17; i++) {
+    const theta = i * (Math.PI / 18) * side;
+    const sd = {
+      x: fwd.x * Math.cos(theta) + right.x * Math.sin(theta),
+      y: fwd.y * Math.cos(theta) + right.y * Math.sin(theta),
+      z: fwd.z * Math.cos(theta) + right.z * Math.sin(theta),
+    };
+    const ax = normalize(cross(current, sd));
+    if (ax.x === 0 && ax.y === 0 && ax.z === 0) continue;
+    const candidate = normalize(applyAxisAngle(current, ax, step));
+    if (canTraverse(candidate, entity)) return candidate;
   }
   return null;
 }
@@ -307,6 +323,7 @@ class GameRoom {
       nukeRadius: def.nukeRadius || 0,
       target: null, attackTarget: null, gatherTarget: null,
       gathering: false, gatherCooldown: 0, constructTarget: null,
+      wallFollowing: false, wallSide: 0,
       alive: true, name: def.name,
     };
     this.entities.push(entity);
@@ -335,6 +352,7 @@ class GameRoom {
             u.gatherTarget = null;
             u.gathering = false;
             u.constructTarget = null;
+            u.wallFollowing = false; u.wallSide = 0;
           }
         }
         break;
@@ -350,6 +368,7 @@ class GameRoom {
             u.target = { ...targetEntity.pos };
             u.gatherTarget = null;
             u.gathering = false;
+            u.wallFollowing = false; u.wallSide = 0;
           }
         }
         break;
@@ -364,6 +383,7 @@ class GameRoom {
             u.gatherTarget = cmd.targetId;
             u.target = { ...resource.pos };
             u.attackTarget = null;
+            u.wallFollowing = false; u.wallSide = 0;
           }
         }
         break;
@@ -506,16 +526,31 @@ class GameRoom {
           if (ax.x === 0 && ax.y === 0 && ax.z === 0) continue;
           const step = Math.min(e.speed * dt * 0.1, dist);
           const newPos = normalize(applyAxisAngle(current, ax, step));
-          if (!canTraverse(newPos, e)) {
-            // Try to steer around the obstacle
-            const steerAx = findValidMoveDirection(current, target, e);
-            if (steerAx) {
-              const steerPos = normalize(applyAxisAngle(current, steerAx, step));
-              if (canTraverse(steerPos, e)) e.pos = steerPos;
-            }
-            // else: can't move this tick, but keep target so we keep trying
-          } else {
+          if (canTraverse(newPos, e)) {
+            // Direct path clear — go straight, reset wall-following
             e.pos = newPos;
+            e.wallFollowing = false;
+            e.wallSide = 0;
+          } else {
+            // Blocked — wall-follow on a committed side
+            if (!e.wallFollowing) {
+              // First contact: choose whichever side works first
+              for (const side of [1, -1]) {
+                const c = steerStep(current, target, e, side, step);
+                if (c) { e.pos = c; e.wallFollowing = true; e.wallSide = side; break; }
+              }
+            } else {
+              // Already wall-following: stay on committed side
+              const c = steerStep(current, target, e, e.wallSide, step);
+              if (c) {
+                e.pos = c;
+              } else {
+                // Committed side is also stuck — flip and try other side
+                const alt = steerStep(current, target, e, -e.wallSide, step);
+                if (alt) { e.pos = alt; e.wallSide = -e.wallSide; }
+                // else: completely surrounded, stay put and keep trying
+              }
+            }
           }
         } else {
           // Arrived
@@ -603,7 +638,13 @@ class GameRoom {
             if (tgt.hp <= 0) { this.destroyEntity(tgt); e.attackTarget = null; e.target = null; }
           }
         } else if (!e.isBuilding) {
-          e.target = { ...tgt.pos };
+          // Only reset wall-following if the target has moved significantly
+          const prevTarget = e.target;
+          const newTarget = { ...tgt.pos };
+          if (!prevTarget || angleBetween(normalize(prevTarget), normalize(newTarget)) > 0.05) {
+            e.wallFollowing = false; e.wallSide = 0;
+          }
+          e.target = newTarget;
         }
       }
     }
