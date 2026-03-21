@@ -1,9 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
 // HEGEMONY — Globe RTS — Multiplayer Server
 // ═══════════════════════════════════════════════════════════════
-// Authoritative server: all game logic runs here.
-// Clients send commands, server broadcasts state.
-// ═══════════════════════════════════════════════════════════════
 
 const express = require('express');
 const http = require('http');
@@ -20,134 +17,156 @@ const PORT = process.env.PORT || 3000;
 
 // ── Constants ──
 const GLOBE_RADIUS = 5;
-const TICK_RATE = 20; // 20 ticks/sec
+const TICK_RATE = 20;
 const TICK_MS = 1000 / TICK_RATE;
 
-// ── Unit Definitions ──
+// ── Age System ──
+const AGE_NAMES = ['Stone Age', 'Industrial Age', 'Modern Age', 'Space Age'];
+const AGE_ADVANCE_COST = [
+  null,
+  { minerals: 600,  energy: 300  },
+  { minerals: 1200, energy: 600  },
+  { minerals: 2500, energy: 1200 },
+];
+
+// ── Unit / Building Definitions ──
 const UNIT_DEFS = {
+
+  // ── Stone Age (0) ──
   worker: {
     name: 'Worker', hp: 40, maxHp: 40, speed: 0.4, attack: 5, range: 0.3,
     cost: { minerals: 50, energy: 0 }, popCost: 1,
-    gatherRate: 8, isBuilding: false,
+    gatherRate: 8, isBuilding: false, minAge: 0,
   },
   soldier: {
     name: 'Soldier', hp: 80, maxHp: 80, speed: 0.55, attack: 15, range: 1.5,
     cost: { minerals: 80, energy: 20 }, popCost: 1,
-    attackSpeed: 1.2, isBuilding: false,
+    attackSpeed: 1.2, isBuilding: false, minAge: 0,
   },
   base: {
-    name: 'Command Base', hp: 300, maxHp: 300, isBuilding: true,
-    attack: 0, range: 0,
+    name: 'Command Base', hp: 500, maxHp: 500, isBuilding: true,
+    attack: 0, range: 0, minAge: 0,
   },
   outpost: {
     name: 'Outpost', hp: 150, maxHp: 150, isBuilding: true,
     cost: { minerals: 200, energy: 50 }, popCapBonus: 5,
-    attack: 0, range: 0,
+    attack: 0, range: 0, minAge: 0,
   },
   turret: {
     name: 'Defense Turret', hp: 120, maxHp: 120, isBuilding: true,
     cost: { minerals: 120, energy: 40 },
-    attack: 20, range: 2.5, attackSpeed: 1.5,
+    attack: 20, range: 2.5, attackSpeed: 1.5, minAge: 0,
+  },
+
+  // ── Industrial Age (1) ──
+  tank: {
+    name: 'Tank', hp: 200, maxHp: 200, speed: 0.35, attack: 35, range: 2.0,
+    cost: { minerals: 150, energy: 60 }, popCost: 2,
+    attackSpeed: 2.0, isBuilding: false, minAge: 1,
+  },
+  dock: {
+    name: 'Dock', hp: 180, maxHp: 180, isBuilding: true,
+    cost: { minerals: 250, energy: 80 },
+    attack: 0, range: 0, minAge: 1,
+  },
+  boat: {
+    name: 'Warship', hp: 160, maxHp: 160, speed: 0.45, attack: 28, range: 2.8,
+    cost: { minerals: 130, energy: 60 }, popCost: 2,
+    attackSpeed: 1.8, isBuilding: false, minAge: 1, spawnFromDock: true,
+  },
+
+  // ── Modern Age (2) ──
+  airplane: {
+    name: 'Fighter Jet', hp: 100, maxHp: 100, speed: 1.2, attack: 40, range: 3.0,
+    cost: { minerals: 200, energy: 120 }, popCost: 2,
+    attackSpeed: 1.5, isBuilding: false, minAge: 2, isAir: true,
+  },
+  silo: {
+    name: 'Missile Silo', hp: 200, maxHp: 200, isBuilding: true,
+    cost: { minerals: 400, energy: 200 },
+    attack: 80, range: 7.0, attackSpeed: 10.0, minAge: 2,
+  },
+
+  // ── Space Age (3) ──
+  rocket: {
+    name: 'Orbital Rocket', hp: 120, maxHp: 120, speed: 1.5, attack: 150, range: 8.0,
+    cost: { minerals: 500, energy: 300 }, popCost: 2,
+    attackSpeed: 3.0, isBuilding: false, minAge: 3, isAir: true,
+  },
+  nuke: {
+    name: 'Nuclear ICBM', hp: 60, maxHp: 60, speed: 2.0, attack: 400,
+    cost: { minerals: 800, energy: 500 }, popCost: 3,
+    isBuilding: false, minAge: 3, isAir: true,
+    isNuke: true, nukeRadius: 2.5,
   },
 };
 
 // ── Math Helpers ──
-function vec3(x, y, z) { return { x, y, z }; }
-
 function normalize(v) {
   const len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
   if (len === 0) return { x: 0, y: 1, z: 0 };
   return { x: v.x / len, y: v.y / len, z: v.z / len };
 }
-
 function dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-
 function cross(a, b) {
-  return {
-    x: a.y * b.z - a.z * b.y,
-    y: a.z * b.x - a.x * b.z,
-    z: a.x * b.y - a.y * b.x,
-  };
+  return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
 }
-
 function angleBetween(a, b) {
   return Math.acos(Math.max(-1, Math.min(1, dot(normalize(a), normalize(b)))));
 }
-
 function applyAxisAngle(v, axis, angle) {
-  // Rodrigues' rotation
-  const c = Math.cos(angle), s = Math.sin(angle);
-  const d = dot(axis, v);
-  const cr = cross(axis, v);
+  const c = Math.cos(angle), s = Math.sin(angle), d = dot(axis, v), cr = cross(axis, v);
   return {
     x: v.x * c + cr.x * s + axis.x * d * (1 - c),
     y: v.y * c + cr.y * s + axis.y * d * (1 - c),
     z: v.z * c + cr.z * s + axis.z * d * (1 - c),
   };
 }
-
 function lerpVec(a, b, t) {
   return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t };
 }
-
 function randomSurfacePoint() {
   const theta = Math.random() * Math.PI * 2;
   const phi = Math.acos(2 * Math.random() - 1);
-  return normalize({
-    x: Math.sin(phi) * Math.cos(theta),
-    y: Math.sin(phi) * Math.sin(theta),
-    z: Math.cos(phi),
-  });
+  return normalize({ x: Math.sin(phi) * Math.cos(theta), y: Math.sin(phi) * Math.sin(theta), z: Math.cos(phi) });
 }
-
-// Simple noise for terrain height
 function hash(x, y, z) {
   let h = (x | 0) * 374761393 + (y | 0) * 668265263 + (z | 0) * 1274126177;
   h = ((h ^ (h >> 13)) * 1274126177) | 0;
   return (h & 0x7fffffff) / 0x7fffffff;
 }
-
 function smoothNoise(x, y, z) {
   const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
   const fx = x - ix, fy = y - iy, fz = z - iz;
   const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy), sz = fz * fz * (3 - 2 * fz);
   function h(a, b, c) { return hash(a & 0xff, b & 0xff, c & 0xff); }
   return (
-    h(ix, iy, iz) * (1 - sx) * (1 - sy) * (1 - sz) +
-    h(ix + 1, iy, iz) * sx * (1 - sy) * (1 - sz) +
-    h(ix, iy + 1, iz) * (1 - sx) * sy * (1 - sz) +
-    h(ix + 1, iy + 1, iz) * sx * sy * (1 - sz) +
-    h(ix, iy, iz + 1) * (1 - sx) * (1 - sy) * sz +
-    h(ix + 1, iy, iz + 1) * sx * (1 - sy) * sz +
-    h(ix, iy + 1, iz + 1) * (1 - sx) * sy * sz +
-    h(ix + 1, iy + 1, iz + 1) * sx * sy * sz
+    h(ix,iy,iz)*(1-sx)*(1-sy)*(1-sz) + h(ix+1,iy,iz)*sx*(1-sy)*(1-sz) +
+    h(ix,iy+1,iz)*(1-sx)*sy*(1-sz) + h(ix+1,iy+1,iz)*sx*sy*(1-sz) +
+    h(ix,iy,iz+1)*(1-sx)*(1-sy)*sz + h(ix+1,iy,iz+1)*sx*(1-sy)*sz +
+    h(ix,iy+1,iz+1)*(1-sx)*sy*sz + h(ix+1,iy+1,iz+1)*sx*sy*sz
   ) * 2 - 1;
 }
-
 function fbmNoise(x, y, z) {
-  return smoothNoise(x, y, z) * 0.5 + smoothNoise(x * 2, y * 2, z * 2) * 0.25 +
-    smoothNoise(x * 4, y * 4, z * 4) * 0.125;
+  return smoothNoise(x,y,z)*0.5 + smoothNoise(x*2,y*2,z*2)*0.25 + smoothNoise(x*4,y*4,z*4)*0.125;
 }
-
-function getSurfaceHeight(normal) {
+function getSurfaceHeight(n) {
   const s = 2.5;
-  let h = 0;
-  h += fbmNoise(normal.x * s, normal.y * s, normal.z * s) * 0.3;
-  h += fbmNoise(normal.x * s * 2 + 5, normal.y * s * 2 + 5, normal.z * s * 2 + 5) * 0.15;
-  h += fbmNoise(normal.x * s * 4 + 10, normal.y * s * 4 + 10, normal.z * s * 4 + 10) * 0.07;
+  let h = fbmNoise(n.x*s, n.y*s, n.z*s)*0.3 +
+          fbmNoise(n.x*s*2+5, n.y*s*2+5, n.z*s*2+5)*0.15 +
+          fbmNoise(n.x*s*4+10, n.y*s*4+10, n.z*s*4+10)*0.07;
   return GLOBE_RADIUS + h;
 }
 
 // ── Game Room ──
 class GameRoom {
   constructor() {
-    this.players = {};       // { id: { ws, faction, minerals, energy, pop, popCap } }
-    this.entities = [];      // All game entities
-    this.projectiles = [];
+    this.players = {};
+    this.entities = [];
     this.nextEntityId = 1;
     this.started = false;
     this.tickInterval = null;
-    this.events = [];        // Events to broadcast this tick (explosions, notifications, etc.)
+    this.events = [];
   }
 
   addPlayer(ws) {
@@ -157,42 +176,24 @@ class GameRoom {
       ws.close();
       return null;
     }
-
     const id = playerIds.length === 0 ? 'p1' : 'p2';
     const faction = id === 'p1' ? 1 : 2;
-
     this.players[id] = {
-      ws,
-      id,
-      faction,
-      minerals: 500,
-      energy: 200,
-      pop: 0,
-      popCap: 10,
+      ws, id, faction,
+      minerals: 500, energy: 200,
+      pop: 0, popCap: 10,
+      age: 0,
     };
-
-    ws.send(JSON.stringify({
-      type: 'assigned',
-      playerId: id,
-      faction,
-    }));
-
-    // Notify all players of roster
+    ws.send(JSON.stringify({ type: 'assigned', playerId: id, faction }));
     this.broadcastLobby();
-
-    if (Object.keys(this.players).length === 2 && !this.started) {
-      this.startGame();
-    }
-
+    if (Object.keys(this.players).length === 2 && !this.started) this.startGame();
     return id;
   }
 
   removePlayer(id) {
     delete this.players[id];
     this.broadcastLobby();
-    if (this.started && Object.keys(this.players).length === 0) {
-      this.stop();
-    }
+    if (this.started && Object.keys(this.players).length === 0) this.stop();
   }
 
   broadcastLobby() {
@@ -203,7 +204,7 @@ class GameRoom {
   startGame() {
     this.started = true;
     this.initEntities();
-    this.broadcast({ type: 'gameStart', terrain: this.getTerrainSeed() });
+    this.broadcast({ type: 'gameStart', terrain: { globeRadius: GLOBE_RADIUS } });
     this.tickInterval = setInterval(() => this.tick(), TICK_MS);
   }
 
@@ -212,42 +213,26 @@ class GameRoom {
     this.started = false;
   }
 
-  getTerrainSeed() {
-    // Clients use the same noise functions — just confirm they share logic
-    return { globeRadius: GLOBE_RADIUS };
-  }
-
   initEntities() {
-    // Player 1 base (north-ish)
     const p1Start = normalize({ x: 0, y: 0.3, z: 1 });
     this.spawnEntity('base', p1Start, 1);
-    for (let i = 0; i < 3; i++) {
-      const offset = normalize(lerpVec(randomSurfacePoint(), p1Start, 0.92));
-      this.spawnEntity('worker', offset, 1);
-    }
+    for (let i = 0; i < 3; i++)
+      this.spawnEntity('worker', normalize(lerpVec(randomSurfacePoint(), p1Start, 0.92)), 1);
 
-    // Player 2 base (south-ish / opposite)
     const p2Start = normalize({ x: 0, y: -0.3, z: -1 });
     this.spawnEntity('base', p2Start, 2);
-    for (let i = 0; i < 3; i++) {
-      const offset = normalize(lerpVec(randomSurfacePoint(), p2Start, 0.92));
-      this.spawnEntity('worker', offset, 2);
-    }
+    for (let i = 0; i < 3; i++)
+      this.spawnEntity('worker', normalize(lerpVec(randomSurfacePoint(), p2Start, 0.92)), 2);
 
-    // Resource nodes
-    const resTypes = ['minerals', 'energy'];
-    for (let i = 0; i < 20; i++) {
+    // Resource nodes — more variety
+    for (let i = 0; i < 28; i++) {
       const pos = randomSurfacePoint();
-      const resType = resTypes[i % 2];
+      const resType = i % 2 === 0 ? 'minerals' : 'energy';
       this.entities.push({
-        id: this.nextEntityId++,
-        type: 'resource',
-        resourceType: resType,
-        amount: resType === 'minerals' ? 500 : 300,
-        maxAmount: resType === 'minerals' ? 500 : 300,
-        pos,
-        faction: 0,
-        alive: true,
+        id: this.nextEntityId++, type: 'resource', resourceType: resType,
+        amount: resType === 'minerals' ? 700 : 450,
+        maxAmount: resType === 'minerals' ? 700 : 450,
+        pos, faction: 0, alive: true,
       });
     }
   }
@@ -255,12 +240,9 @@ class GameRoom {
   spawnEntity(type, pos, faction) {
     const def = UNIT_DEFS[type];
     const entity = {
-      id: this.nextEntityId++,
-      type,
-      pos: normalize(pos),
-      faction,
-      hp: def.hp,
-      maxHp: def.maxHp,
+      id: this.nextEntityId++, type,
+      pos: normalize(pos), faction,
+      hp: def.hp, maxHp: def.maxHp,
       attack: def.attack || 0,
       range: def.range || 0,
       speed: def.speed || 0,
@@ -269,26 +251,17 @@ class GameRoom {
       gatherRate: def.gatherRate || 0,
       popCost: def.popCost || 0,
       isBuilding: def.isBuilding || false,
-      target: null,
-      attackTarget: null,
-      gatherTarget: null,
-      gathering: false,
-      gatherCooldown: 0,
-      alive: true,
-      name: def.name,
+      isAir: def.isAir || false,
+      isNuke: def.isNuke || false,
+      nukeRadius: def.nukeRadius || 0,
+      target: null, attackTarget: null, gatherTarget: null,
+      gathering: false, gatherCooldown: 0,
+      alive: true, name: def.name,
     };
-
     this.entities.push(entity);
-
-    // Update pop
     const player = Object.values(this.players).find(p => p.faction === faction);
-    if (player && !def.isBuilding && def.popCost) {
-      player.pop += def.popCost;
-    }
-    if (def.popCapBonus && player) {
-      player.popCap += def.popCapBonus;
-    }
-
+    if (player && !def.isBuilding && def.popCost) player.pop += def.popCost;
+    if (def.popCapBonus && player) player.popCap += def.popCapBonus;
     return entity;
   }
 
@@ -298,9 +271,9 @@ class GameRoom {
 
     switch (cmd.action) {
       case 'move': {
-        const units = cmd.unitIds.map(id => this.entities.find(e => e.id === id));
         const target = normalize(cmd.target);
-        for (const u of units) {
+        for (const uid of cmd.unitIds) {
+          const u = this.entities.find(e => e.id === uid);
           if (u && u.alive && u.faction === player.faction && !u.isBuilding) {
             u.target = target;
             u.attackTarget = null;
@@ -312,10 +285,10 @@ class GameRoom {
       }
 
       case 'attack': {
-        const units = cmd.unitIds.map(id => this.entities.find(e => e.id === id));
         const targetEntity = this.entities.find(e => e.id === cmd.targetId);
         if (!targetEntity || !targetEntity.alive) break;
-        for (const u of units) {
+        for (const uid of cmd.unitIds) {
+          const u = this.entities.find(e => e.id === uid);
           if (u && u.alive && u.faction === player.faction && !u.isBuilding) {
             u.attackTarget = cmd.targetId;
             u.target = { ...targetEntity.pos };
@@ -327,10 +300,10 @@ class GameRoom {
       }
 
       case 'gather': {
-        const units = cmd.unitIds.map(id => this.entities.find(e => e.id === id));
         const resource = this.entities.find(e => e.id === cmd.targetId && e.type === 'resource');
         if (!resource || !resource.alive) break;
-        for (const u of units) {
+        for (const uid of cmd.unitIds) {
+          const u = this.entities.find(e => e.id === uid);
           if (u && u.alive && u.type === 'worker' && u.faction === player.faction) {
             u.gatherTarget = cmd.targetId;
             u.target = { ...resource.pos };
@@ -341,59 +314,99 @@ class GameRoom {
       }
 
       case 'build_unit': {
-        const unitType = cmd.unitType;
-        const def = UNIT_DEFS[unitType];
+        const def = UNIT_DEFS[cmd.unitType];
         if (!def || def.isBuilding) break;
+        if ((def.minAge || 0) > player.age) {
+          this.sendTo(playerId, { type: 'notify', msg: `Requires ${AGE_NAMES[def.minAge]}!` }); break;
+        }
         if (player.minerals < (def.cost?.minerals || 0)) {
-          this.sendTo(playerId, { type: 'notify', msg: 'Need more minerals!' });
-          break;
+          this.sendTo(playerId, { type: 'notify', msg: 'Need more minerals!' }); break;
         }
         if (player.energy < (def.cost?.energy || 0)) {
-          this.sendTo(playerId, { type: 'notify', msg: 'Need more energy!' });
-          break;
+          this.sendTo(playerId, { type: 'notify', msg: 'Need more energy!' }); break;
         }
         if (player.pop >= player.popCap) {
-          this.sendTo(playerId, { type: 'notify', msg: 'Population cap reached!' });
-          break;
+          this.sendTo(playerId, { type: 'notify', msg: 'Population cap reached!' }); break;
         }
-        player.minerals -= def.cost.minerals;
-        player.energy -= def.cost.energy;
-        const base = this.entities.find(e =>
-          e.type === 'base' && e.faction === player.faction && e.alive
-        );
-        if (base) {
-          const offset = normalize(lerpVec(randomSurfacePoint(), base.pos, 0.93));
-          this.spawnEntity(unitType, offset, player.faction);
-          this.sendTo(playerId, { type: 'notify', msg: `${def.name} deployed` });
+
+        let spawnAnchor = null;
+        if (def.spawnFromDock) {
+          spawnAnchor = this.entities.find(e => e.type === 'dock' && e.faction === player.faction && e.alive);
+          if (!spawnAnchor) {
+            this.sendTo(playerId, { type: 'notify', msg: 'Build a Dock first!' }); break;
+          }
+        } else {
+          spawnAnchor = this.entities.find(e => e.type === 'base' && e.faction === player.faction && e.alive);
         }
+        if (!spawnAnchor) break;
+
+        player.minerals -= def.cost.minerals || 0;
+        player.energy  -= def.cost.energy  || 0;
+        const offset = normalize(lerpVec(randomSurfacePoint(), spawnAnchor.pos, 0.93));
+        this.spawnEntity(cmd.unitType, offset, player.faction);
+        this.sendTo(playerId, { type: 'notify', msg: `${def.name} deployed` });
         break;
       }
 
       case 'build_structure': {
-        const structType = cmd.structType;
-        const def = UNIT_DEFS[structType];
+        const def = UNIT_DEFS[cmd.structType];
         if (!def || !def.isBuilding) break;
-        if (player.minerals < (def.cost?.minerals || 0) || player.energy < (def.cost?.energy || 0)) {
-          this.sendTo(playerId, { type: 'notify', msg: 'Insufficient resources!' });
-          break;
+        if ((def.minAge || 0) > player.age) {
+          this.sendTo(playerId, { type: 'notify', msg: `Requires ${AGE_NAMES[def.minAge]}!` }); break;
         }
-        player.minerals -= def.cost.minerals;
-        player.energy -= def.cost.energy;
-        const pos = normalize(cmd.pos);
-        this.spawnEntity(structType, pos, player.faction);
+        if (player.minerals < (def.cost?.minerals || 0) || player.energy < (def.cost?.energy || 0)) {
+          this.sendTo(playerId, { type: 'notify', msg: 'Insufficient resources!' }); break;
+        }
+        player.minerals -= def.cost.minerals || 0;
+        player.energy  -= def.cost.energy  || 0;
+        this.spawnEntity(cmd.structType, normalize(cmd.pos), player.faction);
         this.sendTo(playerId, { type: 'notify', msg: `${def.name} constructed` });
         break;
       }
+
+      case 'advance_age': {
+        if (player.age >= AGE_NAMES.length - 1) {
+          this.sendTo(playerId, { type: 'notify', msg: 'Already at maximum age!' }); break;
+        }
+        const nextAge = player.age + 1;
+        const cost = AGE_ADVANCE_COST[nextAge];
+        if (player.minerals < cost.minerals || player.energy < cost.energy) {
+          this.sendTo(playerId, { type: 'notify', msg: `Need ${cost.minerals}M + ${cost.energy}E to advance!` }); break;
+        }
+        player.minerals -= cost.minerals;
+        player.energy  -= cost.energy;
+        player.age      = nextAge;
+        player.popCap  += 5;
+        this.sendTo(playerId, { type: 'notify', msg: `⚡ Advanced to ${AGE_NAMES[nextAge]}!` });
+        break;
+      }
     }
+  }
+
+  nukeDetonation(nuke) {
+    if (!nuke.alive) return;
+    const pos = nuke.pos;
+    for (const e of this.entities) {
+      if (!e.alive || e.id === nuke.id) continue;
+      const dist = angleBetween(pos, e.pos) * GLOBE_RADIUS;
+      if (dist <= nuke.nukeRadius) {
+        const falloff = Math.max(0, 1 - dist / nuke.nukeRadius * 0.6);
+        e.hp -= nuke.attack * falloff;
+        if (e.hp <= 0) this.destroyEntity(e);
+      }
+    }
+    this.events.push({ type: 'nuke_explosion', pos: { ...pos } });
+    this.destroyEntity(nuke);
   }
 
   tick() {
     const dt = TICK_MS / 1000;
     this.events = [];
 
-    // Passive energy income
+    // Passive income (scales with age)
     for (const p of Object.values(this.players)) {
-      p.energy += 1 * dt; // 1 per second
+      p.energy   += (1 + p.age * 0.5) * dt;
+      p.minerals += p.age * 0.2 * dt;
     }
 
     for (const e of this.entities) {
@@ -402,24 +415,25 @@ class GameRoom {
       // ── Movement ──
       if (e.target && !e.isBuilding && e.speed) {
         const current = normalize(e.pos);
-        const target = normalize(e.target);
+        const target  = normalize(e.target);
         const dist = angleBetween(current, target);
 
         if (dist > 0.015) {
           const ax = normalize(cross(current, target));
           if (ax.x === 0 && ax.y === 0 && ax.z === 0) continue;
-          const step = Math.min(e.speed * dt * 0.1, dist);
-          e.pos = normalize(applyAxisAngle(current, ax, step));
+          e.pos = normalize(applyAxisAngle(current, ax, Math.min(e.speed * dt * 0.1, dist)));
         } else {
+          // Arrived
+          if (e.isNuke) { this.nukeDetonation(e); continue; }
           if (e.gatherTarget) {
             const res = this.entities.find(r => r.id === e.gatherTarget);
-            if (res && res.alive && res.amount > 0) {
-              e.gathering = true;
-            }
+            if (res && res.alive && res.amount > 0) e.gathering = true;
           }
           if (!e.attackTarget) e.target = null;
         }
       }
+
+      if (!e.alive) continue;
 
       // ── Gathering ──
       if (e.gathering && e.gatherTarget && e.gatherRate) {
@@ -430,24 +444,17 @@ class GameRoom {
           if (res && res.alive && res.amount > 0) {
             const amt = Math.min(e.gatherRate, res.amount);
             res.amount -= amt;
-            const player = Object.values(this.players).find(p => p.faction === e.faction);
-            if (player) {
-              if (res.resourceType === 'minerals') player.minerals += amt;
-              else player.energy += amt;
+            const pl = Object.values(this.players).find(p => p.faction === e.faction);
+            if (pl) {
+              if (res.resourceType === 'minerals') pl.minerals += amt;
+              else pl.energy += amt;
             }
-            if (res.amount <= 0) {
-              res.alive = false;
-              e.gathering = false;
-              e.gatherTarget = null;
-            }
-          } else {
-            e.gathering = false;
-            e.gatherTarget = null;
-          }
+            if (res.amount <= 0) { res.alive = false; e.gathering = false; e.gatherTarget = null; }
+          } else { e.gathering = false; e.gatherTarget = null; }
         }
       }
 
-      // ── Attack cooldown ──
+      // ── Cooldown ──
       if (e.attackCooldown > 0) e.attackCooldown -= dt;
 
       // ── Auto-target ──
@@ -456,69 +463,45 @@ class GameRoom {
         for (const o of this.entities) {
           if (!o.alive || o.faction === e.faction || o.faction === 0) continue;
           const d = angleBetween(e.pos, o.pos) * GLOBE_RADIUS;
-          if (d < e.range && d < nearestDist) {
-            nearest = o;
-            nearestDist = d;
-          }
+          if (d < e.range && d < nearestDist) { nearest = o; nearestDist = d; }
         }
         if (nearest) e.attackTarget = nearest.id;
       }
 
       // ── Attack ──
       if (e.attackTarget && e.attack) {
-        const target = this.entities.find(t => t.id === e.attackTarget);
-        if (!target || !target.alive) {
-          e.attackTarget = null;
-          e.target = null;
-          continue;
-        }
+        const tgt = this.entities.find(t => t.id === e.attackTarget);
+        if (!tgt || !tgt.alive) { e.attackTarget = null; e.target = null; continue; }
 
-        const dist = angleBetween(e.pos, target.pos) * GLOBE_RADIUS;
+        const dist = angleBetween(e.pos, tgt.pos) * GLOBE_RADIUS;
         if (dist <= e.range) {
           if (e.attackCooldown <= 0) {
             e.attackCooldown = e.attackSpeed || 1;
-            target.hp -= e.attack;
-
-            this.events.push({
-              type: 'projectile',
-              from: { ...e.pos },
-              to: { ...target.pos },
-              faction: e.faction,
-            });
-
-            if (target.hp <= 0) {
-              this.destroyEntity(target);
-              e.attackTarget = null;
-              e.target = null;
-            }
+            if (e.isNuke) { this.nukeDetonation(e); continue; }
+            tgt.hp -= e.attack;
+            this.events.push({ type: 'projectile', from: { ...e.pos }, to: { ...tgt.pos }, faction: e.faction });
+            if (tgt.hp <= 0) { this.destroyEntity(tgt); e.attackTarget = null; e.target = null; }
           }
         } else if (!e.isBuilding) {
-          e.target = { ...target.pos };
+          e.target = { ...tgt.pos };
         }
       }
     }
 
-    // Broadcast state
+    // Prune dead non-resource entities
+    this.entities = this.entities.filter(e => e.alive || e.type === 'resource');
+
     this.broadcastState();
   }
 
   destroyEntity(entity) {
     entity.alive = false;
     this.events.push({ type: 'explosion', pos: { ...entity.pos } });
-
     const player = Object.values(this.players).find(p => p.faction === entity.faction);
-    if (player && !entity.isBuilding && entity.popCost) {
-      player.pop -= entity.popCost;
-    }
-
+    if (player && !entity.isBuilding && entity.popCost) player.pop -= entity.popCost;
     if (entity.type === 'base') {
-      const loser = entity.faction;
-      const winner = loser === 1 ? 2 : 1;
-      this.broadcast({
-        type: 'gameOver',
-        winner,
-        loser,
-      });
+      const winner = entity.faction === 1 ? 2 : 1;
+      this.broadcast({ type: 'gameOver', winner, loser: entity.faction });
       setTimeout(() => this.stop(), 3000);
     }
   }
@@ -527,21 +510,12 @@ class GameRoom {
     const entityStates = this.entities
       .filter(e => e.alive)
       .map(e => ({
-        id: e.id,
-        type: e.type,
-        pos: e.pos,
-        faction: e.faction,
-        hp: e.hp,
-        maxHp: e.maxHp,
-        isBuilding: e.isBuilding,
+        id: e.id, type: e.type, pos: e.pos, faction: e.faction,
+        hp: e.hp, maxHp: e.maxHp,
+        isBuilding: e.isBuilding, isAir: e.isAir,
         name: e.name,
-        resourceType: e.resourceType,
-        amount: e.amount,
-        maxAmount: e.maxAmount,
-        gathering: e.gathering,
-        attack: e.attack,
-        range: e.range,
-        gatherRate: e.gatherRate,
+        resourceType: e.resourceType, amount: e.amount, maxAmount: e.maxAmount,
+        gathering: e.gathering, attack: e.attack, range: e.range, gatherRate: e.gatherRate,
       }));
 
     const playerStates = {};
@@ -550,59 +524,42 @@ class GameRoom {
         faction: p.faction,
         minerals: Math.floor(p.minerals),
         energy: Math.floor(p.energy),
-        pop: p.pop,
-        popCap: p.popCap,
+        pop: p.pop, popCap: p.popCap,
+        age: p.age,
       };
     }
 
-    this.broadcast({
-      type: 'state',
-      entities: entityStates,
-      players: playerStates,
-      events: this.events,
-    });
+    this.broadcast({ type: 'state', entities: entityStates, players: playerStates, events: this.events });
   }
 
   broadcast(data) {
     const msg = JSON.stringify(data);
-    for (const p of Object.values(this.players)) {
-      if (p.ws.readyState === WebSocket.OPEN) {
-        p.ws.send(msg);
-      }
-    }
+    for (const p of Object.values(this.players))
+      if (p.ws.readyState === WebSocket.OPEN) p.ws.send(msg);
   }
 
   sendTo(playerId, data) {
     const p = this.players[playerId];
-    if (p && p.ws.readyState === WebSocket.OPEN) {
-      p.ws.send(JSON.stringify(data));
-    }
+    if (p && p.ws.readyState === WebSocket.OPEN) p.ws.send(JSON.stringify(data));
   }
 }
 
-// ── Server State ──
+// ── Server ──
 let currentRoom = new GameRoom();
 
 wss.on('connection', (ws) => {
-  // If room is full or game ended, create new room
-  if (Object.keys(currentRoom.players).length >= 2 && currentRoom.started) {
+  if (Object.keys(currentRoom.players).length >= 2 && currentRoom.started)
     currentRoom = new GameRoom();
-  }
 
   const playerId = currentRoom.addPlayer(ws);
   if (!playerId) return;
-
   const room = currentRoom;
 
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
-      if (msg.type === 'command') {
-        room.handleCommand(playerId, msg);
-      }
-    } catch (err) {
-      console.error('Bad message:', err);
-    }
+      if (msg.type === 'command') room.handleCommand(playerId, msg);
+    } catch (err) { console.error('Bad message:', err); }
   });
 
   ws.on('close', () => {
@@ -615,8 +572,6 @@ server.listen(PORT, () => {
   console.log(`\n  ╔══════════════════════════════════════════╗`);
   console.log(`  ║   HEGEMONY — Globe RTS Server            ║`);
   console.log(`  ║   Running on http://localhost:${PORT}        ║`);
-  console.log(`  ║                                          ║`);
-  console.log(`  ║   Share your IP:${PORT} with your friend    ║`);
-  console.log(`  ║   Both open the URL in a browser.        ║`);
+  console.log(`  ║   4 Ages · Nukes · Jets · Warships        ║`);
   console.log(`  ╚══════════════════════════════════════════╝\n`);
 });
