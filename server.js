@@ -168,8 +168,9 @@ function getTerrainH(pos) {
 function isWater(pos)  { return getTerrainH(pos) < -0.02; }
 function canTraverse(pos, entity) {
   if (entity.isAir) return true;
-  if (entity.isNaval) return isWater(pos);
-  return !isWater(pos);
+  const h = getTerrainH(pos);
+  if (entity.isNaval) return h < -0.02;
+  return h > 0.0; // small coast-buffer: keeps land units off the visual shoreline
 }
 // Find a valid spawn point near anchorPos matching terrain type
 function findValidSpawn(anchorPos, isNaval, isAir) {
@@ -181,36 +182,33 @@ function findValidSpawn(anchorPos, isNaval, isAir) {
   }
   return normalize(anchorPos);
 }
-// Compute forward + right tangent vectors at current toward target
-function getSteerVectors(current, target) {
-  const d = dot(target, current);
-  const fwd = normalize({
-    x: target.x - d * current.x,
-    y: target.y - d * current.y,
-    z: target.z - d * current.z,
-  });
-  const right = normalize(cross(current, fwd));
-  return { fwd, right };
-}
+// Sample 24 directions in the tangent plane. Score by progress-toward-goal + momentum.
+// Momentum (prevDir) biases toward continuing the same way, preventing left/right oscillation.
+// Returns best traversable position, or null if completely surrounded.
+function bestValidStep(current, target, entity, prevDir, step) {
+  const d0 = dot(target, current);
+  const tx = target.x - d0*current.x, ty = target.y - d0*current.y, tz = target.z - d0*current.z;
+  const tLen = Math.sqrt(tx*tx + ty*ty + tz*tz);
+  if (tLen < 1e-6) return null;
+  const tf = { x: tx/tLen, y: ty/tLen, z: tz/tLen };
+  const right = normalize(cross(current, tf));
 
-// Try to take a step of `step` radians steered toward `side` (+1/-1) away from direct.
-// Tries angles 10°, 20°, … 170° on that side. Returns new pos if traversable, else null.
-function steerStep(current, target, entity, side, step) {
-  const { fwd, right } = getSteerVectors(current, target);
-  if (fwd.x === 0 && fwd.y === 0 && fwd.z === 0) return null;
-  for (let i = 1; i <= 17; i++) {
-    const theta = i * (Math.PI / 18) * side;
-    const sd = {
-      x: fwd.x * Math.cos(theta) + right.x * Math.sin(theta),
-      y: fwd.y * Math.cos(theta) + right.y * Math.sin(theta),
-      z: fwd.z * Math.cos(theta) + right.z * Math.sin(theta),
+  let bestPos = null, bestScore = -Infinity;
+  for (let i = 0; i < 24; i++) {
+    const theta = (i / 24) * Math.PI * 2;
+    const dir = {
+      x: tf.x * Math.cos(theta) + right.x * Math.sin(theta),
+      y: tf.y * Math.cos(theta) + right.y * Math.sin(theta),
+      z: tf.z * Math.cos(theta) + right.z * Math.sin(theta),
     };
-    const ax = normalize(cross(current, sd));
+    const ax = normalize(cross(current, dir));
     if (ax.x === 0 && ax.y === 0 && ax.z === 0) continue;
     const candidate = normalize(applyAxisAngle(current, ax, step));
-    if (canTraverse(candidate, entity)) return candidate;
+    if (!canTraverse(candidate, entity)) continue;
+    const score = dot(dir, tf) + (prevDir ? 0.45 * dot(dir, prevDir) : 0);
+    if (score > bestScore) { bestScore = score; bestPos = candidate; }
   }
-  return null;
+  return bestPos;
 }
 
 // Find a valid land starting position near an approximate location
@@ -323,7 +321,7 @@ class GameRoom {
       nukeRadius: def.nukeRadius || 0,
       target: null, attackTarget: null, gatherTarget: null,
       gathering: false, gatherCooldown: 0, constructTarget: null,
-      wallFollowing: false, wallSide: 0,
+      prevMoveDir: null, stuckTimer: 0, stuckCheckDist: null,
       alive: true, name: def.name,
     };
     this.entities.push(entity);
@@ -348,11 +346,9 @@ class GameRoom {
               continue;
             }
             u.target = target;
-            u.attackTarget = null;
-            u.gatherTarget = null;
-            u.gathering = false;
-            u.constructTarget = null;
-            u.wallFollowing = false; u.wallSide = 0;
+            u.attackTarget = null; u.gatherTarget = null;
+            u.gathering = false; u.constructTarget = null;
+            u.prevMoveDir = null; u.stuckTimer = 0; u.stuckCheckDist = null;
           }
         }
         break;
@@ -366,9 +362,8 @@ class GameRoom {
           if (u && u.alive && u.faction === player.faction && !u.isBuilding) {
             u.attackTarget = cmd.targetId;
             u.target = { ...targetEntity.pos };
-            u.gatherTarget = null;
-            u.gathering = false;
-            u.wallFollowing = false; u.wallSide = 0;
+            u.gatherTarget = null; u.gathering = false;
+            u.prevMoveDir = null; u.stuckTimer = 0; u.stuckCheckDist = null;
           }
         }
         break;
@@ -383,7 +378,7 @@ class GameRoom {
             u.gatherTarget = cmd.targetId;
             u.target = { ...resource.pos };
             u.attackTarget = null;
-            u.wallFollowing = false; u.wallSide = 0;
+            u.prevMoveDir = null; u.stuckTimer = 0; u.stuckCheckDist = null;
           }
         }
         break;
@@ -525,30 +520,32 @@ class GameRoom {
           const ax = normalize(cross(current, target));
           if (ax.x === 0 && ax.y === 0 && ax.z === 0) continue;
           const step = Math.min(e.speed * dt * 0.1, dist);
-          const newPos = normalize(applyAxisAngle(current, ax, step));
-          if (canTraverse(newPos, e)) {
-            // Direct path clear — go straight, reset wall-following
-            e.pos = newPos;
-            e.wallFollowing = false;
-            e.wallSide = 0;
+          const directPos = normalize(applyAxisAngle(current, ax, step));
+
+          let movedTo = null;
+          if (canTraverse(directPos, e)) {
+            movedTo = directPos;
           } else {
-            // Blocked — wall-follow on a committed side
-            if (!e.wallFollowing) {
-              // First contact: choose whichever side works first
-              for (const side of [1, -1]) {
-                const c = steerStep(current, target, e, side, step);
-                if (c) { e.pos = c; e.wallFollowing = true; e.wallSide = side; break; }
-              }
+            // Find best alternative direction using momentum to avoid oscillation
+            movedTo = bestValidStep(current, target, e, e.prevMoveDir || null, step);
+          }
+
+          if (movedTo) {
+            // Store movement direction as momentum for next tick
+            e.prevMoveDir = normalize({ x: movedTo.x - current.x, y: movedTo.y - current.y, z: movedTo.z - current.z });
+            e.pos = movedTo;
+            // Stuck detection: reset timer if we got closer to target
+            const newDist = angleBetween(movedTo, target);
+            if ((e.stuckCheckDist || Infinity) - newDist > 0.005) {
+              e.stuckCheckDist = newDist;
+              e.stuckTimer = 0;
             } else {
-              // Already wall-following: stay on committed side
-              const c = steerStep(current, target, e, e.wallSide, step);
-              if (c) {
-                e.pos = c;
-              } else {
-                // Committed side is also stuck — flip and try other side
-                const alt = steerStep(current, target, e, -e.wallSide, step);
-                if (alt) { e.pos = alt; e.wallSide = -e.wallSide; }
-                // else: completely surrounded, stay put and keep trying
+              e.stuckTimer = (e.stuckTimer || 0) + dt;
+              if (e.stuckTimer > 8) { // Give up after 8s of no progress
+                e.target = null;
+                e.prevMoveDir = null;
+                e.stuckTimer = 0;
+                e.stuckCheckDist = null;
               }
             }
           }
@@ -638,13 +635,7 @@ class GameRoom {
             if (tgt.hp <= 0) { this.destroyEntity(tgt); e.attackTarget = null; e.target = null; }
           }
         } else if (!e.isBuilding) {
-          // Only reset wall-following if the target has moved significantly
-          const prevTarget = e.target;
-          const newTarget = { ...tgt.pos };
-          if (!prevTarget || angleBetween(normalize(prevTarget), normalize(newTarget)) > 0.05) {
-            e.wallFollowing = false; e.wallSide = 0;
-          }
-          e.target = newTarget;
+          e.target = { ...tgt.pos };
         }
       }
     }
