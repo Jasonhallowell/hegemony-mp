@@ -406,71 +406,108 @@ function triHeight(nx, ny, nz) {
 }
 
 function createGlobe() {
-  // toNonIndexed: each triangle gets its own 3 vertices → per-face flat shading + per-face color
-  const geo = new THREE.IcosahedronGeometry(GLOBE_RADIUS, 5).toNonIndexed();
-  const pos = geo.attributes.position;
-  const colors = [];
+  // Cube-sphere: 6 cube faces subdivided into NxN square cells, projected onto sphere
+  const N = 50; // cells per face edge → 6×50²=15,000 square voxels
+  const vPositions = [];
+  const vNormals = [];
+  const vColors = [];
 
-  for (let t = 0; t < pos.count; t += 3) {
-    // Read the 3 vertex normals (pre-displacement they're just normalized positions)
-    const verts = [];
-    for (let k = 0; k < 3; k++) {
-      const rx = pos.getX(t+k), ry = pos.getY(t+k), rz = pos.getZ(t+k);
-      const len = Math.sqrt(rx*rx + ry*ry + rz*rz);
-      verts.push({ nx: rx/len, ny: ry/len, nz: rz/len });
-    }
+  // 6 cube face mappings: (u,v) in [-1,1]² → [x,y,z] on cube surface
+  const cubeFaces = [
+    (u, v) => [ 1, v,-u],   // +X
+    (u, v) => [-1, v, u],   // -X
+    (u, v) => [ u, 1,-v],   // +Y
+    (u, v) => [ u,-1, v],   // -Y
+    (u, v) => [ u, v, 1],   // +Z
+    (u, v) => [-u, v,-1],   // -Z
+  ];
 
-    // Triangle-average height decides water vs land — sharp triangle-edge boundaries
-    const h0 = triHeight(verts[0].nx, verts[0].ny, verts[0].nz);
-    const h1 = triHeight(verts[1].nx, verts[1].ny, verts[1].nz);
-    const h2 = triHeight(verts[2].nx, verts[2].ny, verts[2].nz);
-    const avgH = (h0 + h1 + h2) / 3;
-    const isWaterTri = avgH < WATER_H;
-
-    // All triangles displaced by their individual vertex height — water is just a color change
-    const hs = [h0, h1, h2];
-    for (let k = 0; k < 3; k++) {
-      const { nx, ny, nz } = verts[k];
-      const r = GLOBE_RADIUS + hs[k];
-      pos.setXYZ(t+k, nx*r, ny*r, nz*r);
-    }
-
-    // Single flat color per triangle (no gradient blending — clean triangle edges)
-    const midNy = (verts[0].ny + verts[1].ny + verts[2].ny) / 3;
-    const lat = Math.abs(midNy);
-    const hn = verts[0];
-    const heatN = fbmNoise(hn.nx*3+20, hn.ny*3+20, hn.nz*3+20);
-    let c;
-
-    if (isWaterTri) {
-      c = new THREE.Color(0x1a5080); // all water triangles same clean blue
-    } else if (lat > 0.82) {
-      c = new THREE.Color(0xe8f2f8);
-    } else if (avgH < WATER_H + 0.08) {
-      c = new THREE.Color(0xc4b468); // beach
-    } else if (avgH < 0.10) {
-      c = lat < 0.38 && heatN > 0.05 ? new THREE.Color(0xcc8828) : new THREE.Color(0x588040);
-    } else if (avgH < 0.20) {
-      c = lat < 0.35 && heatN > 0.08 ? new THREE.Color(0xb07028) : new THREE.Color(0x386028);
-    } else if (avgH < 0.30) {
-      c = new THREE.Color(0x787060);
-    } else {
-      c = new THREE.Color(0xe8f0f4);
-    }
-
-    for (let k = 0; k < 3; k++) colors.push(c.r, c.g, c.b);
+  function toSphere(xyz) {
+    const [x,y,z] = xyz;
+    const len = Math.sqrt(x*x + y*y + z*z);
+    return { nx: x/len, ny: y/len, nz: z/len };
   }
 
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  geo.computeVertexNormals(); // flat normals per face → faceted low-poly look
+  const H_STEP = 0.025; // height quantization for blocky voxel look
+
+  for (const face of cubeFaces) {
+    for (let row = 0; row < N; row++) {
+      for (let col = 0; col < N; col++) {
+        const u0 = (col / N) * 2 - 1;
+        const u1 = ((col+1) / N) * 2 - 1;
+        const v0 = (row / N) * 2 - 1;
+        const v1 = ((row+1) / N) * 2 - 1;
+
+        // Cell center on sphere
+        const center = toSphere(face((u0+u1)/2, (v0+v1)/2));
+
+        // Height at cell center, quantized for voxel steps
+        const rawH = triHeight(center.nx, center.ny, center.nz);
+        const qH = Math.round(rawH / H_STEP) * H_STEP;
+        const isWater = rawH < WATER_H;
+
+        // Water cells at flat level, land at quantized height
+        const cellH = isWater ? -0.12 : qH;
+
+        // 4 corners projected onto sphere, all at same cell height (flat voxel face)
+        const corners = [
+          toSphere(face(u0, v0)),
+          toSphere(face(u1, v0)),
+          toSphere(face(u0, v1)),
+          toSphere(face(u1, v1)),
+        ];
+
+        const r = GLOBE_RADIUS + cellH;
+        const verts = corners.map(n => [n.nx*r, n.ny*r, n.nz*r]);
+
+        // Two triangles per quad: 0-1-2 and 1-3-2
+        vPositions.push(...verts[0], ...verts[1], ...verts[2]);
+        vPositions.push(...verts[1], ...verts[3], ...verts[2]);
+
+        // All 6 vertices share cell center normal → no diagonal seam across quad
+        for (let i = 0; i < 6; i++) {
+          vNormals.push(center.nx, center.ny, center.nz);
+        }
+
+        // Biome color
+        const lat = Math.abs(center.ny);
+        const heatN = fbmNoise(center.nx*3+20, center.ny*3+20, center.nz*3+20);
+        let c;
+
+        if (isWater) {
+          c = rawH < -0.20 ? new THREE.Color(0x0e3860) : new THREE.Color(0x1a5080);
+        } else if (lat > 0.82) {
+          c = new THREE.Color(0xe8f2f8);
+        } else if (rawH < WATER_H + 0.08) {
+          c = new THREE.Color(0xc4b468);
+        } else if (rawH < 0.10) {
+          c = lat < 0.38 && heatN > 0.05 ? new THREE.Color(0xcc8828) : new THREE.Color(0x588040);
+        } else if (rawH < 0.20) {
+          c = lat < 0.35 && heatN > 0.08 ? new THREE.Color(0xb07028) : new THREE.Color(0x386028);
+        } else if (rawH < 0.30) {
+          c = new THREE.Color(0x787060);
+        } else {
+          c = new THREE.Color(0xe8f0f4);
+        }
+
+        for (let i = 0; i < 6; i++) {
+          vColors.push(c.r, c.g, c.b);
+        }
+      }
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(vPositions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(vNormals, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(vColors, 3));
+
   globeMesh = new THREE.Mesh(geo,
     new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.04 })
   );
   globeMesh.castShadow = true;
   globeMesh.receiveShadow = true;
   globeGroup.add(globeMesh);
-
-  // No ocean sphere — the flat-colored water triangles ARE the water surface
 
   // Atmosphere glow
   globeGroup.add(new THREE.Mesh(
