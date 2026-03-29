@@ -1677,19 +1677,19 @@ function updateEntities(dt) {
 
     // ── Smooth interpolation for mobile units ──
     if (!sd.isBuilding && sd.type !== 'resource') {
-      const prevPos = ent.mesh.position.clone();
       ent.mesh.position.lerp(ent.targetPos, 0.22);
 
-      // Face direction of movement
-      const delta = ent.mesh.position.clone().sub(prevPos);
-      if (delta.lengthSq() > 1e-9) {
-        // Project movement onto tangent plane (remove up component)
-        const upDot  = delta.dot(up);
-        const forward = delta.clone().sub(up.clone().multiplyScalar(upDot)).normalize();
+      // Face toward target position (not frame delta) for stable orientation
+      const toTarget = ent.targetPos.clone().sub(ent.mesh.position);
+      if (toTarget.lengthSq() > 1e-8) {
+        const upDot = toTarget.dot(up);
+        const forward = toTarget.clone().sub(up.clone().multiplyScalar(upDot)).normalize();
         if (forward.lengthSq() > 0.001) {
-          // right = cross(forward, up) gives correct right-hand orientation
           const right = new THREE.Vector3().crossVectors(forward, up).normalize();
-          ent.mesh.setRotationFromMatrix(new THREE.Matrix4().makeBasis(forward, up, right));
+          const targetQuat = new THREE.Quaternion().setFromRotationMatrix(
+            new THREE.Matrix4().makeBasis(forward, up, right)
+          );
+          ent.mesh.quaternion.slerp(targetQuat, 0.15);
         }
       }
     }
