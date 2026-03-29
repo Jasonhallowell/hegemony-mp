@@ -592,17 +592,20 @@ function rebuildChunks(dirtySet) {
 
 function removeVoxelsAndRebuild(keys) {
   const dirty = new Set();
+  let removed = 0, skipped = 0;
   for (const key of keys) {
     const p = key.split(',').map(Number);
-    if (clientVoxels.getAt(p[0], p[1], p[2]) === 0) continue;
+    if (clientVoxels.getAt(p[0], p[1], p[2]) === 0) { skipped++; continue; }
     clientVoxels.deleteAt(p[0], p[1], p[2]);
+    removed++;
     const ck = voxelToChunkKey(p[0], p[1], p[2]);
     dirty.add(ck);
+    // Also mark neighbor chunks as dirty (cross-boundary faces)
     for (const [ddx, ddy, ddz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
-      const nck = voxelToChunkKey(p[0]+ddx, p[1]+ddy, p[2]+ddz);
-      if (nck !== ck) dirty.add(nck);
+      dirty.add(voxelToChunkKey(p[0]+ddx, p[1]+ddy, p[2]+ddz));
     }
   }
+  console.log(`Crater: ${keys.length} keys, ${removed} removed, ${skipped} skipped, ${dirty.size} dirty chunks`);
   rebuildChunks(dirty);
 }
 
@@ -1719,16 +1722,15 @@ function updateEntities(dt) {
 
       const isMissile = sd.type === 'silo_missile' || sd.type === 'nuke' || sd.type === 'rocket';
       if (isMissile) {
-        // Missiles: orient body axis (local Y) along actual frame-to-frame movement
-        const vel = ent.mesh.position.clone().sub(prevPos);
-        if (vel.lengthSq() > 1e-10) {
-          const dir = vel.normalize();
-          // Store stable direction to avoid jitter
-          if (!ent.lastMissileDir) ent.lastMissileDir = dir.clone();
-          ent.lastMissileDir.lerp(dir, 0.08).normalize();
-          const targetQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), ent.lastMissileDir);
-          ent.mesh.quaternion.slerp(targetQuat, 0.12);
+        // Missiles: orient using stable direction from server position deltas
+        if (!ent.prevServerPos) ent.prevServerPos = ent.targetPos.clone();
+        // Only recompute direction when server position actually changes
+        if (!ent.prevServerPos.equals(ent.targetPos)) {
+          const dir = ent.targetPos.clone().sub(ent.prevServerPos).normalize();
+          ent.missileQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+          ent.prevServerPos.copy(ent.targetPos);
         }
+        if (ent.missileQuat) ent.mesh.quaternion.copy(ent.missileQuat);
       } else {
         // Face toward target position (not frame delta) for stable orientation
         const toTarget = ent.targetPos.clone().sub(ent.mesh.position);
