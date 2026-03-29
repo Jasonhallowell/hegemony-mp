@@ -172,22 +172,43 @@ function getTerrainH(pos) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// VOXEL GLOBE GENERATION
+// VOXEL GRID — Int8Array-backed for solid planet
 // ═══════════════════════════════════════════════════════════════
+
+class VoxelGrid {
+  constructor(halfSize) {
+    this.half = halfSize;
+    this.side = halfSize * 2 + 1;
+    this.data = new Int8Array(this.side * this.side * this.side);
+  }
+  _idx(ix, iy, iz) { return (ix + this.half) * this.side * this.side + (iy + this.half) * this.side + (iz + this.half); }
+  inBounds(ix, iy, iz) { return ix >= -this.half && ix <= this.half && iy >= -this.half && iy <= this.half && iz >= -this.half && iz <= this.half; }
+  getAt(ix, iy, iz) { if (!this.inBounds(ix, iy, iz)) return 0; return this.data[this._idx(ix, iy, iz)]; }
+  setAt(ix, iy, iz, val) { if (!this.inBounds(ix, iy, iz)) return; this.data[this._idx(ix, iy, iz)] = val; }
+  deleteAt(ix, iy, iz) { this.setAt(ix, iy, iz, 0); }
+  // String-key compat for existing code
+  has(key) { const p = key.split(','); return this.getAt(+p[0], +p[1], +p[2]) !== 0; }
+  get(key) { const p = key.split(','); const v = this.getAt(+p[0], +p[1], +p[2]); return v || undefined; }
+  set(key, val) { const p = key.split(','); this.setAt(+p[0], +p[1], +p[2], val); }
+  delete(key) { const p = key.split(','); this.deleteAt(+p[0], +p[1], +p[2]); }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// VOXEL GLOBE GENERATION (Solid Planet)
+// ═══════════════════════════════════════════════════════════════
+
+const FACE_DIRS = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
 
 function generateVoxelGlobe() {
   const VS = VOXEL_SIZE;
-  const SHELL_DEPTH = 5; // only 5 voxels deep
-  const voxels = new Map();    // key "ix,iy,iz" -> type (1=land, 2=water)
+  const voxels = new VoxelGrid(GRID_HALF);
   const landSurface = new Set();
   const waterSurface = new Set();
 
-  // Only iterate the thin spherical shell — compute valid iz range per (ix,iy)
-  const minR = GLOBE_RADIUS - 1.0;
   const maxR = GLOBE_RADIUS + 1.0;
-  const iMax = Math.ceil(maxR / VS);
-  const minR2 = minR * minR;
   const maxR2 = maxR * maxR;
+  const iMax = Math.min(GRID_HALF, Math.ceil(maxR / VS));
+  const deepR = GLOBE_RADIUS - 1.0;
 
   for (let ix = -iMax; ix <= iMax; ix++) {
     const x2 = (ix * VS) * (ix * VS);
@@ -195,62 +216,73 @@ function generateVoxelGlobe() {
     for (let iy = -iMax; iy <= iMax; iy++) {
       const xy2 = x2 + (iy * VS) * (iy * VS);
       if (xy2 > maxR2) continue;
-
-      // Compute the iz range that falls within the shell [minR, maxR]
       const remMax = maxR2 - xy2;
       if (remMax < 0) continue;
-      const izOuter = Math.floor(Math.sqrt(remMax) / VS);
-      const remMin = minR2 - xy2;
-      const izInner = remMin > 0 ? Math.ceil(Math.sqrt(remMin) / VS) : 0;
+      const izMax = Math.floor(Math.sqrt(remMax) / VS);
 
-      // Only iterate the two thin bands: [-izOuter,-izInner] and [izInner,izOuter]
-      for (let iz = -izOuter; iz <= izOuter; iz++) {
-        if (iz > -izInner && iz < izInner) continue;
+      for (let iz = -izMax; iz <= izMax; iz++) {
         const cx = ix * VS, cy = iy * VS, cz = iz * VS;
         const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
-        if (d < 0.001) continue;
+
+        // Deep interior: solid land, skip expensive noise
+        if (d < deepR) { voxels.setAt(ix, iy, iz, 1); continue; }
+        if (d < 0.001) { voxels.setAt(ix, iy, iz, 1); continue; }
 
         const dir = normalize({ x: cx, y: cy, z: cz });
         const h = getTerrainH(dir);
         const landR = GLOBE_RADIUS + h;
         const seaR = GLOBE_RADIUS + WATER_H;
 
-        if (d <= landR && d > landR - VS * SHELL_DEPTH) {
-          voxels.set(`${ix},${iy},${iz}`, 1);
-        } else if (d > landR && h < WATER_H && d <= seaR) {
-          voxels.set(`${ix},${iy},${iz}`, 2);
+        if (d <= landR) {
+          voxels.setAt(ix, iy, iz, 1);
+        } else if (h < WATER_H && d <= seaR) {
+          voxels.setAt(ix, iy, iz, 2);
         }
       }
     }
   }
 
-  // Build surface caches
   buildSurfaceCaches(voxels, landSurface, waterSurface);
-
-  console.log(`  Voxels generated: ${voxels.size} total, ${landSurface.size} land surface, ${waterSurface.size} water surface`);
-
+  console.log(`  Voxels: land surface=${landSurface.size}, water surface=${waterSurface.size}`);
   return { voxels, landSurface, waterSurface };
 }
-
-// 6 face neighbors for surface detection
-const FACE_DIRS = [
-  [1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]
-];
 
 function buildSurfaceCaches(voxels, landSurface, waterSurface) {
   landSurface.clear();
   waterSurface.clear();
+  const VS = VOXEL_SIZE;
+  // Only check near-surface voxels (deep interior is never exposed)
+  const minR = GLOBE_RADIUS - 1.5;
+  const maxR = GLOBE_RADIUS + 1.0;
+  const maxR2 = maxR * maxR, minR2 = minR * minR;
+  const iMax = Math.min(GRID_HALF, Math.ceil(maxR / VS));
 
-  for (const [key, type] of voxels) {
-    const [ix, iy, iz] = key.split(',').map(Number);
-    let exposed = false;
-    for (const [dx, dy, dz] of FACE_DIRS) {
-      const nk = `${ix+dx},${iy+dy},${iz+dz}`;
-      if (!voxels.has(nk)) { exposed = true; break; }
-    }
-    if (exposed) {
-      if (type === 1) landSurface.add(key);
-      else if (type === 2) waterSurface.add(key);
+  for (let ix = -iMax; ix <= iMax; ix++) {
+    const x2 = (ix * VS) * (ix * VS);
+    if (x2 > maxR2) continue;
+    for (let iy = -iMax; iy <= iMax; iy++) {
+      const xy2 = x2 + (iy * VS) * (iy * VS);
+      if (xy2 > maxR2) continue;
+      const remMax = maxR2 - xy2;
+      if (remMax < 0) continue;
+      const izOuter = Math.floor(Math.sqrt(remMax) / VS);
+      const remMin = minR2 - xy2;
+      const izInner = remMin > 0 ? Math.ceil(Math.sqrt(remMin) / VS) : 0;
+
+      for (let iz = -izOuter; iz <= izOuter; iz++) {
+        if (iz > -izInner && iz < izInner) continue;
+        const type = voxels.getAt(ix, iy, iz);
+        if (!type) continue;
+        let exposed = false;
+        for (const [dx, dy, dz] of FACE_DIRS) {
+          if (voxels.getAt(ix+dx, iy+dy, iz+dz) === 0) { exposed = true; break; }
+        }
+        if (exposed) {
+          const key = `${ix},${iy},${iz}`;
+          if (type === 1) landSurface.add(key);
+          else if (type === 2) waterSurface.add(key);
+        }
+      }
     }
   }
 }
@@ -519,6 +551,18 @@ function createCrater(pos, radius, room) {
     }
 
     room.events.push({ type: 'crater', removed });
+
+    // Reposition entities on destroyed ground to new surface level
+    const impactNorm = normalize({ x: pos.x, y: pos.y, z: pos.z });
+    for (const ent of room.entities) {
+      if (!ent.alive || ent.isAir || ent.type === 'resource' || ent.type === 'silo_missile') continue;
+      const dist = angleBetween(impactNorm, ent.pos) * GLOBE_RADIUS;
+      if (dist <= radius * 1.5) {
+        const surfaceSet = ent.isNaval ? room.waterSurface : room.landSurface;
+        const cell = normalToCell(ent.pos, surfaceSet);
+        if (cell) ent.pos = cellToNormal(cell.ix, cell.iy, cell.iz);
+      }
+    }
   }
 }
 
@@ -666,6 +710,7 @@ class GameRoom {
       path: null, pathIndex: 0,
       alive: true, name: def.name,
       altitude: 0, flightStart: null, flightTotal: 0,
+      siloCooldown: 0,
     };
     this.entities.push(entity);
     const player = Object.values(this.players).find(p => p.faction === entity.faction);
@@ -891,6 +936,48 @@ class GameRoom {
     for (const e of this.entities) {
       if (!e.alive || e.type === 'resource') continue;
 
+      // ── Silo cooldown ──
+      if (e.type === 'silo' && e.siloCooldown > 0) e.siloCooldown -= dt;
+
+      // ── Silo Missile ballistic physics ──
+      if (e.type === 'silo_missile') {
+        e.missileTime += dt;
+        const progress = Math.min(1, e.missileTime / e.missileFlightDuration);
+
+        // Track moving target during ascent only (first half)
+        if (progress < 0.5 && e.missileTargetId) {
+          const tgt = this.entities.find(t => t.id === e.missileTargetId && t.alive);
+          if (tgt) e.missileTargetPos = { ...tgt.pos };
+        }
+
+        // Interpolate along great circle
+        const angle = angleBetween(e.missileLaunchPos, e.missileTargetPos);
+        if (angle > 0.001) {
+          const axis = normalize(cross(e.missileLaunchPos, e.missileTargetPos));
+          e.pos = normalize(applyAxisAngle(e.missileLaunchPos, axis, angle * progress));
+        }
+        // Ballistic altitude: parabolic arc
+        e.altitude = 4 * e.missilePeakAlt * progress * (1 - progress);
+
+        if (progress >= 1) {
+          // Impact!
+          const worldPos = { x: e.pos.x * GLOBE_RADIUS, y: e.pos.y * GLOBE_RADIUS, z: e.pos.z * GLOBE_RADIUS };
+          for (const other of this.entities) {
+            if (!other.alive || other.id === e.id) continue;
+            const dist = angleBetween(e.pos, other.pos) * GLOBE_RADIUS;
+            if (dist <= 1.2) {
+              const falloff = Math.max(0, 1 - dist / 1.2 * 0.6);
+              other.hp -= 80 * falloff;
+              if (other.hp <= 0) this.destroyEntity(other);
+            }
+          }
+          createCrater(worldPos, 0.8, this);
+          this.events.push({ type: 'explosion', pos: { ...e.pos } });
+          this.destroyEntity(e);
+        }
+        continue; // skip normal movement
+      }
+
       // ── Movement via A* path following ──
       if (e.path && e.pathIndex < e.path.length && !e.isBuilding && e.speed) {
         const current = normalize(e.pos);
@@ -1011,6 +1098,34 @@ class GameRoom {
         if (nearest) e.attackTarget = nearest.id;
       }
 
+      // ── Silo: launch physical missile instead of instant attack ──
+      if (e.type === 'silo' && e.attackTarget) {
+        const tgt = this.entities.find(t => t.id === e.attackTarget);
+        if (!tgt || !tgt.alive) { e.attackTarget = null; continue; }
+        if (e.siloCooldown <= 0) {
+          e.siloCooldown = 60;
+          const distance = angleBetween(e.pos, tgt.pos);
+          const missile = {
+            id: this.nextEntityId++, type: 'silo_missile',
+            pos: normalize(e.pos), faction: e.faction,
+            hp: 30, maxHp: 30, attack: 80, range: 0, speed: 0,
+            attackSpeed: 1, attackCooldown: 0, gatherRate: 0, popCost: 0,
+            isBuilding: false, isAir: true, isNaval: false, isNuke: false, nukeRadius: 0,
+            target: null, attackTarget: null, gatherTarget: null,
+            gathering: false, gatherCooldown: 0, constructTarget: null,
+            path: null, pathIndex: 0, alive: true, name: 'Missile',
+            altitude: 0, flightStart: null, flightTotal: 0, siloCooldown: 0,
+            missileLaunchPos: { ...e.pos }, missileTargetPos: { ...tgt.pos },
+            missileTargetId: tgt.id, missileTime: 0, missileFlightDuration: 10,
+            missilePeakAlt: Math.max(2.0, distance * GLOBE_RADIUS * 0.35),
+          };
+          this.entities.push(missile);
+          this.events.push({ type: 'missile_launch', pos: { ...e.pos }, faction: e.faction });
+          e.attackTarget = null;
+        }
+        continue;
+      }
+
       // ── Attack ──
       if (e.attackTarget && e.attack) {
         const tgt = this.entities.find(t => t.id === e.attackTarget);
@@ -1024,20 +1139,14 @@ class GameRoom {
             tgt.hp -= e.attack;
             this.events.push({ type: 'projectile', from: { ...e.pos }, to: { ...tgt.pos }, faction: e.faction, unitType: e.type });
 
-            // Crater from projectile impacts
-            if (e.type === 'silo') {
-              const worldHit = { x: tgt.pos.x * GLOBE_RADIUS, y: tgt.pos.y * GLOBE_RADIUS, z: tgt.pos.z * GLOBE_RADIUS };
-              createCrater(worldHit, 0.8, this);
-            } else if (e.type === 'tank' || e.type === 'turret' || e.type === 'boat') {
+            if (e.type === 'tank' || e.type === 'turret' || e.type === 'boat') {
               const worldHit = { x: tgt.pos.x * GLOBE_RADIUS, y: tgt.pos.y * GLOBE_RADIUS, z: tgt.pos.z * GLOBE_RADIUS };
               createCrater(worldHit, 0.4, this);
             }
-            // soldier/worker/small units: no crater
 
             if (tgt.hp <= 0) { this.destroyEntity(tgt); e.attackTarget = null; e.target = null; e.path = null; }
           }
         } else if (!e.isBuilding) {
-          // Move toward target to get in range
           e.target = { ...tgt.pos };
           if (!e.path || e.pathIndex >= (e.path ? e.path.length : 0)) {
             this.computePath(e, tgt.pos);
@@ -1095,7 +1204,8 @@ class GameRoom {
         resourceType: e.resourceType, amount: e.amount, maxAmount: e.maxAmount,
         gathering: e.gathering, attack: e.attack, range: e.range, gatherRate: e.gatherRate,
         buildType: e.buildType, buildProgress: e.buildProgress, buildTime: e.buildTime,
-        altitude: e.altitude || 0,
+        altitude: e.altitude || 0, siloCooldown: e.siloCooldown || 0,
+        missileProgress: e.missileTime ? e.missileTime / e.missileFlightDuration : 0,
       }));
 
     const playerStates = {};

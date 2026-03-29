@@ -404,8 +404,7 @@ function posOnVoxelSurface(n, offset) {
     const ix = Math.round(dx * r / VS);
     const iy = Math.round(dy * r / VS);
     const iz = Math.round(dz * r / VS);
-    const key = `${ix},${iy},${iz}`;
-    if (clientVoxels.has(key)) {
+    if (clientVoxels.getAt(ix, iy, iz) !== 0) {
       const cx = ix * VS, cy = iy * VS, cz = iz * VS;
       const vr = Math.sqrt(cx*cx + cy*cy + cz*cz);
       return new THREE.Vector3(dx, dy, dz).multiplyScalar(vr + VS/2 + offset);
@@ -416,16 +415,34 @@ function posOnVoxelSurface(n, offset) {
   return new THREE.Vector3(dx, dy, dz).multiplyScalar(h + offset);
 }
 
-// ── Globe — Chunked Voxel Rendering (Minecraft-style) ──
+// ── VoxelGrid (Int8Array-backed for solid planet) ──
+class ClientVoxelGrid {
+  constructor(halfSize) {
+    this.half = halfSize;
+    this.side = halfSize * 2 + 1;
+    this.data = new Int8Array(this.side * this.side * this.side);
+  }
+  _idx(ix, iy, iz) { return (ix + this.half) * this.side * this.side + (iy + this.half) * this.side + (iz + this.half); }
+  inBounds(ix, iy, iz) { return ix >= -this.half && ix <= this.half && iy >= -this.half && iy <= this.half && iz >= -this.half && iz <= this.half; }
+  getAt(ix, iy, iz) { if (!this.inBounds(ix, iy, iz)) return 0; return this.data[this._idx(ix, iy, iz)]; }
+  setAt(ix, iy, iz, val) { if (!this.inBounds(ix, iy, iz)) return; this.data[this._idx(ix, iy, iz)] = val; }
+  deleteAt(ix, iy, iz) { this.setAt(ix, iy, iz, 0); }
+  has(key) { const p = key.split(','); return this.getAt(+p[0], +p[1], +p[2]) !== 0; }
+  get(key) { const p = key.split(','); const v = this.getAt(+p[0], +p[1], +p[2]); return v || undefined; }
+  delete(key) { const p = key.split(','); this.deleteAt(+p[0], +p[1], +p[2]); }
+}
+
+// ── Globe — Chunked Solid Voxel Planet ──
 let raycastSphere;
 
 const WATER_H = -0.10;
 const VOXEL_SIZE = 0.06;
 const CHUNK_SIZE = 16;
+const GRID_HALF = Math.ceil((GLOBE_RADIUS + 1.0) / VOXEL_SIZE);
 
-const clientVoxels = new Map(); // "ix,iy,iz" -> type (1=land, 2=water)
-const chunkVoxelSets = new Map(); // "cx,cy,cz" -> Set of voxel keys
-const chunkMeshes = new Map(); // "cx,cy,cz" -> THREE.Mesh
+let clientVoxels = new ClientVoxelGrid(GRID_HALF);
+const activeChunks = new Set(); // chunk keys with voxels
+const chunkMeshes = new Map();
 
 function voxelToChunkKey(ix, iy, iz) {
   const cs = CHUNK_SIZE;
@@ -440,15 +457,13 @@ function triHeight(nx, ny, nz) {
 }
 
 function generateClientVoxels() {
-  clientVoxels.clear();
-  chunkVoxelSets.clear();
+  clientVoxels = new ClientVoxelGrid(GRID_HALF);
+  activeChunks.clear();
   const VS = VOXEL_SIZE;
-  const SHELL_DEPTH = 5;
-  const minR = GLOBE_RADIUS - 1.0;
   const maxR = GLOBE_RADIUS + 1.0;
-  const iMax = Math.ceil(maxR / VS);
-  const minR2 = minR * minR;
   const maxR2 = maxR * maxR;
+  const iMax = Math.min(GRID_HALF, Math.ceil(maxR / VS));
+  const deepR = GLOBE_RADIUS - 1.0;
 
   for (let ix = -iMax; ix <= iMax; ix++) {
     const x2 = (ix * VS) * (ix * VS);
@@ -458,35 +473,32 @@ function generateClientVoxels() {
       if (xy2 > maxR2) continue;
       const remMax = maxR2 - xy2;
       if (remMax < 0) continue;
-      const izOuter = Math.floor(Math.sqrt(remMax) / VS);
-      const remMin = minR2 - xy2;
-      const izInner = remMin > 0 ? Math.ceil(Math.sqrt(remMin) / VS) : 0;
+      const izMax = Math.floor(Math.sqrt(remMax) / VS);
 
-      for (let iz = -izOuter; iz <= izOuter; iz++) {
-        if (iz > -izInner && iz < izInner) continue;
+      for (let iz = -izMax; iz <= izMax; iz++) {
         const cx = ix * VS, cy = iy * VS, cz = iz * VS;
         const d = Math.sqrt(cx*cx + cy*cy + cz*cz);
-        if (d < 0.001) continue;
+
+        if (d < deepR) { clientVoxels.setAt(ix, iy, iz, 1); activeChunks.add(voxelToChunkKey(ix, iy, iz)); continue; }
+        if (d < 0.001) { clientVoxels.setAt(ix, iy, iz, 1); activeChunks.add(voxelToChunkKey(ix, iy, iz)); continue; }
+
         const nx = cx/d, ny = cy/d, nz = cz/d;
         const h = triHeight(nx, ny, nz);
         const landR = GLOBE_RADIUS + h;
         const seaR = GLOBE_RADIUS + WATER_H;
-        const vkey = `${ix},${iy},${iz}`;
-        let type = 0;
-        if (d <= landR && d > landR - VS * SHELL_DEPTH) type = 1;
-        else if (d > landR && h < WATER_H && d <= seaR) type = 2;
-        if (type) {
-          clientVoxels.set(vkey, type);
-          const ck = voxelToChunkKey(ix, iy, iz);
-          if (!chunkVoxelSets.has(ck)) chunkVoxelSets.set(ck, new Set());
-          chunkVoxelSets.get(ck).add(vkey);
+
+        if (d <= landR) {
+          clientVoxels.setAt(ix, iy, iz, 1);
+          activeChunks.add(voxelToChunkKey(ix, iy, iz));
+        } else if (h < WATER_H && d <= seaR) {
+          clientVoxels.setAt(ix, iy, iz, 2);
+          activeChunks.add(voxelToChunkKey(ix, iy, iz));
         }
       }
     }
   }
 }
 
-// Face templates: CCW winding from outside
 const VS_H = VOXEL_SIZE / 2;
 const FACE_DEFS = [
   { d:[1,0,0],  n:[1,0,0],  v:[[VS_H,-VS_H,-VS_H],[VS_H,VS_H,-VS_H],[VS_H,VS_H,VS_H],[VS_H,-VS_H,VS_H]] },
@@ -499,45 +511,54 @@ const FACE_DEFS = [
 
 const chunkMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.04 });
 
-function buildChunkMesh(chunkKey) {
-  const voxelKeys = chunkVoxelSets.get(chunkKey);
-  if (!voxelKeys || voxelKeys.size === 0) return null;
+function buildChunkMesh(cx, cy, cz) {
   const VS = VOXEL_SIZE;
   const positions = [], normals = [], colors = [];
+  const x0 = cx * CHUNK_SIZE, y0 = cy * CHUNK_SIZE, z0 = cz * CHUNK_SIZE;
 
-  for (const key of voxelKeys) {
-    const type = clientVoxels.get(key);
-    if (!type) continue;
-    const [ix, iy, iz] = key.split(',').map(Number);
-    const cx = ix * VS, cy = iy * VS, cz = iz * VS;
-    const d = Math.sqrt(cx*cx + cy*cy + cz*cz) || 1;
-    const outX = cx/d, outY = cy/d, outZ = cz/d;
-    const rawH = triHeight(outX, outY, outZ);
-    const lat = Math.abs(outY);
-    const heatN = fbmNoise(outX*3+20, outY*3+20, outZ*3+20);
+  for (let ix = x0; ix < x0 + CHUNK_SIZE; ix++) {
+    for (let iy = y0; iy < y0 + CHUNK_SIZE; iy++) {
+      for (let iz = z0; iz < z0 + CHUNK_SIZE; iz++) {
+        const type = clientVoxels.getAt(ix, iy, iz);
+        if (!type) continue;
 
-    let topColor, sideColor;
-    if (type === 2) {
-      topColor = rawH < -0.20 ? new THREE.Color(0x0e3860) : new THREE.Color(0x1a5080);
-      sideColor = new THREE.Color(0x0a2848);
-    } else {
-      if (lat > 0.82) { topColor = new THREE.Color(0xe8f2f8); sideColor = new THREE.Color(0x9098a0); }
-      else if (rawH < WATER_H + 0.08) { topColor = new THREE.Color(0xc4b468); sideColor = new THREE.Color(0x8a7a48); }
-      else if (rawH < 0.10) { topColor = lat < 0.38 && heatN > 0.05 ? new THREE.Color(0xcc8828) : new THREE.Color(0x588040); sideColor = new THREE.Color(0x6b5530); }
-      else if (rawH < 0.20) { topColor = lat < 0.35 && heatN > 0.08 ? new THREE.Color(0xb07028) : new THREE.Color(0x386028); sideColor = new THREE.Color(0x5a4428); }
-      else if (rawH < 0.30) { topColor = new THREE.Color(0x787060); sideColor = new THREE.Color(0x585048); }
-      else { topColor = new THREE.Color(0xe8f0f4); sideColor = new THREE.Color(0x9098a0); }
-    }
+        // Check all 6 faces — only render if neighbor is empty
+        let hasVisibleFace = false;
+        for (const face of FACE_DEFS) {
+          if (clientVoxels.getAt(ix+face.d[0], iy+face.d[1], iz+face.d[2]) !== 0) continue;
+          hasVisibleFace = true;
 
-    for (const face of FACE_DEFS) {
-      const nk = `${ix+face.d[0]},${iy+face.d[1]},${iz+face.d[2]}`;
-      if (clientVoxels.has(nk)) continue;
-      const dotOut = face.n[0]*outX + face.n[1]*outY + face.n[2]*outZ;
-      const color = dotOut > 0.4 ? topColor : sideColor;
-      const v = face.v;
-      positions.push(cx+v[0][0],cy+v[0][1],cz+v[0][2], cx+v[1][0],cy+v[1][1],cz+v[1][2], cx+v[2][0],cy+v[2][1],cz+v[2][2]);
-      positions.push(cx+v[0][0],cy+v[0][1],cz+v[0][2], cx+v[2][0],cy+v[2][1],cz+v[2][2], cx+v[3][0],cy+v[3][1],cz+v[3][2]);
-      for (let i = 0; i < 6; i++) { normals.push(face.n[0], face.n[1], face.n[2]); colors.push(color.r, color.g, color.b); }
+          // Compute colors lazily on first visible face
+          if (!hasVisibleFace || positions.length === 0 || true) {
+            const cxp = ix * VS, cyp = iy * VS, czp = iz * VS;
+            const d = Math.sqrt(cxp*cxp + cyp*cyp + czp*czp) || 1;
+            const outX = cxp/d, outY = cyp/d, outZ = czp/d;
+            const rawH = triHeight(outX, outY, outZ);
+            const lat = Math.abs(outY);
+            const heatN = fbmNoise(outX*3+20, outY*3+20, outZ*3+20);
+
+            let topColor, sideColor;
+            if (type === 2) {
+              topColor = rawH < -0.20 ? new THREE.Color(0x0e3860) : new THREE.Color(0x1a5080);
+              sideColor = new THREE.Color(0x0a2848);
+            } else {
+              if (lat > 0.82) { topColor = new THREE.Color(0xe8f2f8); sideColor = new THREE.Color(0x9098a0); }
+              else if (rawH < WATER_H + 0.08) { topColor = new THREE.Color(0xc4b468); sideColor = new THREE.Color(0x8a7a48); }
+              else if (rawH < 0.10) { topColor = lat < 0.38 && heatN > 0.05 ? new THREE.Color(0xcc8828) : new THREE.Color(0x588040); sideColor = new THREE.Color(0x6b5530); }
+              else if (rawH < 0.20) { topColor = lat < 0.35 && heatN > 0.08 ? new THREE.Color(0xb07028) : new THREE.Color(0x386028); sideColor = new THREE.Color(0x5a4428); }
+              else if (rawH < 0.30) { topColor = new THREE.Color(0x787060); sideColor = new THREE.Color(0x585048); }
+              else { topColor = new THREE.Color(0xe8f0f4); sideColor = new THREE.Color(0x9098a0); }
+            }
+
+            const dotOut = face.n[0]*outX + face.n[1]*outY + face.n[2]*outZ;
+            const color = dotOut > 0.4 ? topColor : sideColor;
+            const v = face.v;
+            positions.push(cxp+v[0][0],cyp+v[0][1],czp+v[0][2], cxp+v[1][0],cyp+v[1][1],czp+v[1][2], cxp+v[2][0],cyp+v[2][1],czp+v[2][2]);
+            positions.push(cxp+v[0][0],cyp+v[0][1],czp+v[0][2], cxp+v[2][0],cyp+v[2][1],czp+v[2][2], cxp+v[3][0],cyp+v[3][1],czp+v[3][2]);
+            for (let i = 0; i < 6; i++) { normals.push(face.n[0], face.n[1], face.n[2]); colors.push(color.r, color.g, color.b); }
+          }
+        }
+      }
     }
   }
 
@@ -552,36 +573,33 @@ function buildChunkMesh(chunkKey) {
 function buildAllChunks() {
   for (const [key, mesh] of chunkMeshes) { globeGroup.remove(mesh); mesh.geometry.dispose(); }
   chunkMeshes.clear();
-  for (const [chunkKey] of chunkVoxelSets) {
-    const mesh = buildChunkMesh(chunkKey);
-    if (mesh) { chunkMeshes.set(chunkKey, mesh); globeGroup.add(mesh); }
+  for (const ck of activeChunks) {
+    const [cx, cy, cz] = ck.split(',').map(Number);
+    const mesh = buildChunkMesh(cx, cy, cz);
+    if (mesh) { chunkMeshes.set(ck, mesh); globeGroup.add(mesh); }
   }
 }
 
 function rebuildChunks(dirtySet) {
-  for (const chunkKey of dirtySet) {
-    const old = chunkMeshes.get(chunkKey);
-    if (old) { globeGroup.remove(old); old.geometry.dispose(); chunkMeshes.delete(chunkKey); }
-    if (chunkVoxelSets.has(chunkKey) && chunkVoxelSets.get(chunkKey).size > 0) {
-      const mesh = buildChunkMesh(chunkKey);
-      if (mesh) { chunkMeshes.set(chunkKey, mesh); globeGroup.add(mesh); }
-    }
+  for (const ck of dirtySet) {
+    const old = chunkMeshes.get(ck);
+    if (old) { globeGroup.remove(old); old.geometry.dispose(); chunkMeshes.delete(ck); }
+    const [cx, cy, cz] = ck.split(',').map(Number);
+    const mesh = buildChunkMesh(cx, cy, cz);
+    if (mesh) { chunkMeshes.set(ck, mesh); globeGroup.add(mesh); }
   }
 }
 
 function removeVoxelsAndRebuild(keys) {
   const dirty = new Set();
   for (const key of keys) {
-    if (!clientVoxels.has(key)) continue;
-    clientVoxels.delete(key);
-    const [ix, iy, iz] = key.split(',').map(Number);
-    const ck = voxelToChunkKey(ix, iy, iz);
+    const p = key.split(',').map(Number);
+    if (clientVoxels.getAt(p[0], p[1], p[2]) === 0) continue;
+    clientVoxels.deleteAt(p[0], p[1], p[2]);
+    const ck = voxelToChunkKey(p[0], p[1], p[2]);
     dirty.add(ck);
-    const cs = chunkVoxelSets.get(ck);
-    if (cs) { cs.delete(key); if (cs.size === 0) chunkVoxelSets.delete(ck); }
-    // Neighbor chunks may have newly exposed border faces
     for (const [ddx, ddy, ddz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
-      const nck = voxelToChunkKey(ix+ddx, iy+ddy, iz+ddz);
+      const nck = voxelToChunkKey(p[0]+ddx, p[1]+ddy, p[2]+ddz);
       if (nck !== ck) dirty.add(nck);
     }
   }
@@ -591,7 +609,6 @@ function removeVoxelsAndRebuild(keys) {
 function createGlobe() {
   generateClientVoxels();
   buildAllChunks();
-  // Invisible sphere for raycasting clicks
   raycastSphere = new THREE.Mesh(
     new THREE.SphereGeometry(GLOBE_RADIUS + 0.3, 48, 48),
     new THREE.MeshBasicMaterial({ visible: false })
@@ -950,6 +967,22 @@ function buildModel(type, fc) {
       }
       break;
     }
+    case 'silo_missile': {
+      // Ballistic missile in flight — looks like a rocket
+      const body = add(new THREE.CylinderGeometry(0.022, 0.030, 0.20, 8), 0xdddddd, 0x888888, 0.4, 0.5);
+      body.position.y = 0.10;
+      const nose = add(new THREE.ConeGeometry(0.022, 0.07, 8), 0xff3300, 0xaa1100, 0.3, 0.3);
+      nose.position.y = 0.235;
+      for (let i = 0; i < 4; i++) {
+        const fin = add(new THREE.BoxGeometry(0.004, 0.06, 0.038), 0xcccccc, 0x666666, 0.5, 0.4);
+        fin.position.set(Math.cos(i*Math.PI/2)*0.030, 0.03, Math.sin(i*Math.PI/2)*0.030);
+        fin.rotation.y = i*Math.PI/2;
+      }
+      // Engine flame
+      const flame = add(new THREE.ConeGeometry(0.020, 0.06, 6), 0xff6600, 0xff3300, 0.1, 0.0);
+      flame.position.y = -0.03; flame.rotation.x = Math.PI;
+      break;
+    }
     case 'resource': {
       // Handled separately — return empty group
       break;
@@ -1063,7 +1096,9 @@ function applyState(stateMsg) {
 
     const n = sd.pos;
     let surfOffset;
-    if (sd.type === 'nuke' || sd.type === 'rocket') {
+    if (sd.type === 'silo_missile') {
+      surfOffset = (sd.altitude || 0) + 0.1;
+    } else if (sd.type === 'nuke' || sd.type === 'rocket') {
       surfOffset = (sd.altitude || 0) + 0.1;
     } else if (sd.isAir) {
       surfOffset = 0.55;
