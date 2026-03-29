@@ -392,11 +392,15 @@ function posOnSurface(n, offset = 0.15) {
   return new THREE.Vector3(n.x*f, n.y*f, n.z*f);
 }
 
-// ── Globe ──
+// ── Globe — Axis-aligned voxel cubes (Minecraft-style) ──
 let globeMesh;
 let cloudMesh;
 
-const WATER_H = -0.10; // must match server WATER_H
+const WATER_H = -0.10;
+const VOXEL_SIZE = 0.3;
+const GRID_HALF = Math.ceil((GLOBE_RADIUS + 0.5) / VOXEL_SIZE);
+
+const clientVoxels = new Map(); // "ix,iy,iz" -> type (1=land, 2=water)
 
 function triHeight(nx, ny, nz) {
   const s = 2.5;
@@ -405,109 +409,133 @@ function triHeight(nx, ny, nz) {
          fbmNoise(nx*s*4+10, ny*s*4+10, nz*s*4+10)*0.07;
 }
 
-function createGlobe() {
-  // Cube-sphere: 6 cube faces subdivided into NxN square cells, projected onto sphere
-  const N = 50; // cells per face edge → 6×50²=15,000 square voxels
-  const vPositions = [];
-  const vNormals = [];
-  const vColors = [];
-
-  // 6 cube face mappings: (u,v) in [-1,1]² → [x,y,z] on cube surface
-  const cubeFaces = [
-    (u, v) => [ 1, v,-u],   // +X
-    (u, v) => [-1, v, u],   // -X
-    (u, v) => [ u, 1,-v],   // +Y
-    (u, v) => [ u,-1, v],   // -Y
-    (u, v) => [ u, v, 1],   // +Z
-    (u, v) => [-u, v,-1],   // -Z
-  ];
-
-  function toSphere(xyz) {
-    const [x,y,z] = xyz;
-    const len = Math.sqrt(x*x + y*y + z*z);
-    return { nx: x/len, ny: y/len, nz: z/len };
+function generateClientVoxels() {
+  clientVoxels.clear();
+  const VS = VOXEL_SIZE;
+  for (let ix = -GRID_HALF; ix <= GRID_HALF; ix++) {
+    for (let iy = -GRID_HALF; iy <= GRID_HALF; iy++) {
+      for (let iz = -GRID_HALF; iz <= GRID_HALF; iz++) {
+        const cx = ix * VS, cy = iy * VS, cz = iz * VS;
+        const d = Math.sqrt(cx*cx + cy*cy + cz*cz);
+        if (d < 1 || d > GLOBE_RADIUS + 1) continue;
+        const len = d;
+        const nx = cx/len, ny = cy/len, nz = cz/len;
+        const h = triHeight(nx, ny, nz);
+        const landR = GLOBE_RADIUS + h;
+        const seaR = GLOBE_RADIUS + WATER_H;
+        if (d <= landR && d > landR - VS * 3) {
+          clientVoxels.set(`${ix},${iy},${iz}`, 1);
+        } else if (d > landR && h < WATER_H && d <= seaR) {
+          clientVoxels.set(`${ix},${iy},${iz}`, 2);
+        }
+      }
+    }
   }
+}
 
-  const H_STEP = 0.025; // height quantization for blocky voxel look
+// Face templates: CCW winding from outside, offsets from center in units of VS/2
+const VS_H = VOXEL_SIZE / 2;
+const FACE_DEFS = [
+  { d:[1,0,0],  n:[1,0,0],  v:[[VS_H,-VS_H,-VS_H],[VS_H,VS_H,-VS_H],[VS_H,VS_H,VS_H],[VS_H,-VS_H,VS_H]] },
+  { d:[-1,0,0], n:[-1,0,0], v:[[-VS_H,-VS_H,VS_H],[-VS_H,VS_H,VS_H],[-VS_H,VS_H,-VS_H],[-VS_H,-VS_H,-VS_H]] },
+  { d:[0,1,0],  n:[0,1,0],  v:[[-VS_H,VS_H,VS_H],[VS_H,VS_H,VS_H],[VS_H,VS_H,-VS_H],[-VS_H,VS_H,-VS_H]] },
+  { d:[0,-1,0], n:[0,-1,0], v:[[-VS_H,-VS_H,-VS_H],[VS_H,-VS_H,-VS_H],[VS_H,-VS_H,VS_H],[-VS_H,-VS_H,VS_H]] },
+  { d:[0,0,1],  n:[0,0,1],  v:[[-VS_H,-VS_H,VS_H],[VS_H,-VS_H,VS_H],[VS_H,VS_H,VS_H],[-VS_H,VS_H,VS_H]] },
+  { d:[0,0,-1], n:[0,0,-1], v:[[VS_H,-VS_H,-VS_H],[-VS_H,-VS_H,-VS_H],[-VS_H,VS_H,-VS_H],[VS_H,VS_H,-VS_H]] },
+];
 
-  for (const face of cubeFaces) {
-    for (let row = 0; row < N; row++) {
-      for (let col = 0; col < N; col++) {
-        const u0 = (col / N) * 2 - 1;
-        const u1 = ((col+1) / N) * 2 - 1;
-        const v0 = (row / N) * 2 - 1;
-        const v1 = ((row+1) / N) * 2 - 1;
+function buildVoxelMesh(voxels) {
+  const VS = VOXEL_SIZE;
+  const positions = [];
+  const normals = [];
+  const colors = [];
 
-        // Cell center on sphere
-        const center = toSphere(face((u0+u1)/2, (v0+v1)/2));
+  for (const [key, type] of voxels) {
+    const [ix, iy, iz] = key.split(',').map(Number);
+    const cx = ix * VS, cy = iy * VS, cz = iz * VS;
 
-        // Height at cell center, quantized for voxel steps
-        const rawH = triHeight(center.nx, center.ny, center.nz);
-        const qH = Math.round(rawH / H_STEP) * H_STEP;
-        const isWater = rawH < WATER_H;
+    // Outward direction from globe center
+    const d = Math.sqrt(cx*cx + cy*cy + cz*cz) || 1;
+    const outX = cx/d, outY = cy/d, outZ = cz/d;
 
-        // Water cells at flat level, land at quantized height
-        const cellH = isWater ? -0.12 : qH;
+    // Terrain properties for biome color
+    const rawH = triHeight(outX, outY, outZ);
+    const lat = Math.abs(outY);
+    const heatN = fbmNoise(outX*3+20, outY*3+20, outZ*3+20);
 
-        // 4 corners projected onto sphere, all at same cell height (flat voxel face)
-        const corners = [
-          toSphere(face(u0, v0)),
-          toSphere(face(u1, v0)),
-          toSphere(face(u0, v1)),
-          toSphere(face(u1, v1)),
-        ];
+    // Determine biome colors (top face vs side face)
+    let topColor, sideColor;
+    if (type === 2) {
+      topColor = rawH < -0.20 ? new THREE.Color(0x0e3860) : new THREE.Color(0x1a5080);
+      sideColor = new THREE.Color(0x0a2848);
+    } else {
+      if (lat > 0.82) {
+        topColor = new THREE.Color(0xe8f2f8);
+        sideColor = new THREE.Color(0x9098a0);
+      } else if (rawH < WATER_H + 0.08) {
+        topColor = new THREE.Color(0xc4b468);
+        sideColor = new THREE.Color(0x8a7a48);
+      } else if (rawH < 0.10) {
+        topColor = lat < 0.38 && heatN > 0.05 ? new THREE.Color(0xcc8828) : new THREE.Color(0x588040);
+        sideColor = new THREE.Color(0x6b5530);
+      } else if (rawH < 0.20) {
+        topColor = lat < 0.35 && heatN > 0.08 ? new THREE.Color(0xb07028) : new THREE.Color(0x386028);
+        sideColor = new THREE.Color(0x5a4428);
+      } else if (rawH < 0.30) {
+        topColor = new THREE.Color(0x787060);
+        sideColor = new THREE.Color(0x585048);
+      } else {
+        topColor = new THREE.Color(0xe8f0f4);
+        sideColor = new THREE.Color(0x9098a0);
+      }
+    }
 
-        const r = GLOBE_RADIUS + cellH;
-        const verts = corners.map(n => [n.nx*r, n.ny*r, n.nz*r]);
+    for (const face of FACE_DEFS) {
+      const nk = `${ix+face.d[0]},${iy+face.d[1]},${iz+face.d[2]}`;
+      if (voxels.has(nk)) continue; // hidden face
 
-        // Two triangles per quad: 0-1-2 and 1-3-2
-        vPositions.push(...verts[0], ...verts[1], ...verts[2]);
-        vPositions.push(...verts[1], ...verts[3], ...verts[2]);
+      // Is this the "top" face? (normal aligns with outward from globe center)
+      const dotOut = face.n[0]*outX + face.n[1]*outY + face.n[2]*outZ;
+      const color = dotOut > 0.4 ? topColor : sideColor;
 
-        // All 6 vertices share cell center normal → no diagonal seam across quad
-        for (let i = 0; i < 6; i++) {
-          vNormals.push(center.nx, center.ny, center.nz);
-        }
+      const v = face.v;
+      // Triangle 1: v0, v1, v2
+      positions.push(cx+v[0][0], cy+v[0][1], cz+v[0][2]);
+      positions.push(cx+v[1][0], cy+v[1][1], cz+v[1][2]);
+      positions.push(cx+v[2][0], cy+v[2][1], cz+v[2][2]);
+      // Triangle 2: v0, v2, v3
+      positions.push(cx+v[0][0], cy+v[0][1], cz+v[0][2]);
+      positions.push(cx+v[2][0], cy+v[2][1], cz+v[2][2]);
+      positions.push(cx+v[3][0], cy+v[3][1], cz+v[3][2]);
 
-        // Biome color
-        const lat = Math.abs(center.ny);
-        const heatN = fbmNoise(center.nx*3+20, center.ny*3+20, center.nz*3+20);
-        let c;
-
-        if (isWater) {
-          c = rawH < -0.20 ? new THREE.Color(0x0e3860) : new THREE.Color(0x1a5080);
-        } else if (lat > 0.82) {
-          c = new THREE.Color(0xe8f2f8);
-        } else if (rawH < WATER_H + 0.08) {
-          c = new THREE.Color(0xc4b468);
-        } else if (rawH < 0.10) {
-          c = lat < 0.38 && heatN > 0.05 ? new THREE.Color(0xcc8828) : new THREE.Color(0x588040);
-        } else if (rawH < 0.20) {
-          c = lat < 0.35 && heatN > 0.08 ? new THREE.Color(0xb07028) : new THREE.Color(0x386028);
-        } else if (rawH < 0.30) {
-          c = new THREE.Color(0x787060);
-        } else {
-          c = new THREE.Color(0xe8f0f4);
-        }
-
-        for (let i = 0; i < 6; i++) {
-          vColors.push(c.r, c.g, c.b);
-        }
+      for (let i = 0; i < 6; i++) {
+        normals.push(face.n[0], face.n[1], face.n[2]);
+        colors.push(color.r, color.g, color.b);
       }
     }
   }
 
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(vPositions, 3));
-  geo.setAttribute('normal', new THREE.Float32BufferAttribute(vNormals, 3));
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(vColors, 3));
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  return geo;
+}
 
+function rebuildVoxelMesh() {
+  if (globeMesh) { globeGroup.remove(globeMesh); globeMesh.geometry.dispose(); }
+  const geo = buildVoxelMesh(clientVoxels);
   globeMesh = new THREE.Mesh(geo,
     new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.04 })
   );
   globeMesh.castShadow = true;
   globeMesh.receiveShadow = true;
   globeGroup.add(globeMesh);
+}
+
+function createGlobe() {
+  generateClientVoxels();
+  rebuildVoxelMesh();
 
   // Atmosphere glow
   globeGroup.add(new THREE.Mesh(
@@ -1048,6 +1076,10 @@ function applyState(stateMsg) {
     if (ev.type === 'nuke_explosion') spawnExplosion(ev.pos, true);
     if (ev.type === 'projectile')     spawnProjectile(ev.from, ev.to, ev.faction, ev.unitType);
     if (ev.type === 'build_complete') spawnBuildComplete(ev.pos);
+    if (ev.type === 'crater') {
+      for (const key of ev.removed) clientVoxels.delete(key);
+      rebuildVoxelMesh();
+    }
   }
 
   // Update resources HUD
@@ -1554,6 +1586,10 @@ function connectWS() {
       case 'lobby':     updateLobby(msg); break;
       case 'gameStart':
         client.gameStarted = true;
+        if (msg.destroyedVoxels && msg.destroyedVoxels.length > 0) {
+          for (const key of msg.destroyedVoxels) clientVoxels.delete(key);
+          rebuildVoxelMesh();
+        }
         document.getElementById('lobbyOverlay').classList.add('hidden');
         document.getElementById('bottomPanel').style.display = 'flex';
         updateActionBar();
