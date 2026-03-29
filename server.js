@@ -177,24 +177,33 @@ function getTerrainH(pos) {
 
 function generateVoxelGlobe() {
   const VS = VOXEL_SIZE;
+  const SHELL_DEPTH = 5; // only 5 voxels deep
   const voxels = new Map();    // key "ix,iy,iz" -> type (1=land, 2=water)
   const landSurface = new Set();
   const waterSurface = new Set();
 
-  // Generate voxels
-  for (let ix = -GRID_HALF; ix <= GRID_HALF; ix++) {
-    for (let iy = -GRID_HALF; iy <= GRID_HALF; iy++) {
-      for (let iz = -GRID_HALF; iz <= GRID_HALF; iz++) {
+  // Only iterate the thin shell around the globe surface (not the full cube)
+  const minR = GLOBE_RADIUS - 1.0;  // well below lowest terrain
+  const maxR = GLOBE_RADIUS + 1.0;  // well above highest terrain
+  const iMin = Math.floor(minR / VS);
+  const iMax = Math.ceil(maxR / VS);
+
+  for (let ix = -iMax; ix <= iMax; ix++) {
+    for (let iy = -iMax; iy <= iMax; iy++) {
+      for (let iz = -iMax; iz <= iMax; iz++) {
         const cx = ix * VS, cy = iy * VS, cz = iz * VS;
-        const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
-        if (d < 0.001) continue; // skip origin
+        const d2 = cx * cx + cy * cy + cz * cz;
+        // Quick bounding sphere check to skip most cells
+        if (d2 < minR * minR || d2 > maxR * maxR) continue;
+        const d = Math.sqrt(d2);
+        if (d < 0.001) continue;
 
         const dir = normalize({ x: cx, y: cy, z: cz });
         const h = getTerrainH(dir);
         const landR = GLOBE_RADIUS + h;
         const seaR = GLOBE_RADIUS + WATER_H;
 
-        if (d <= landR && d > landR - VS * 3) {
+        if (d <= landR && d > landR - VS * SHELL_DEPTH) {
           voxels.set(`${ix},${iy},${iz}`, 1); // land
         } else if (d > landR && h < WATER_H && d <= seaR) {
           voxels.set(`${ix},${iy},${iz}`, 2); // water

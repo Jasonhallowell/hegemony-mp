@@ -412,18 +412,24 @@ function triHeight(nx, ny, nz) {
 function generateClientVoxels() {
   clientVoxels.clear();
   const VS = VOXEL_SIZE;
-  for (let ix = -GRID_HALF; ix <= GRID_HALF; ix++) {
-    for (let iy = -GRID_HALF; iy <= GRID_HALF; iy++) {
-      for (let iz = -GRID_HALF; iz <= GRID_HALF; iz++) {
+  const SHELL_DEPTH = 5;
+  const minR = GLOBE_RADIUS - 1.0;
+  const maxR = GLOBE_RADIUS + 1.0;
+  const iMax = Math.ceil(maxR / VS);
+
+  for (let ix = -iMax; ix <= iMax; ix++) {
+    for (let iy = -iMax; iy <= iMax; iy++) {
+      for (let iz = -iMax; iz <= iMax; iz++) {
         const cx = ix * VS, cy = iy * VS, cz = iz * VS;
-        const d = Math.sqrt(cx*cx + cy*cy + cz*cz);
-        if (d < 1 || d > GLOBE_RADIUS + 1) continue;
-        const len = d;
-        const nx = cx/len, ny = cy/len, nz = cz/len;
+        const d2 = cx*cx + cy*cy + cz*cz;
+        if (d2 < minR * minR || d2 > maxR * maxR) continue;
+        const d = Math.sqrt(d2);
+        if (d < 0.001) continue;
+        const nx = cx/d, ny = cy/d, nz = cz/d;
         const h = triHeight(nx, ny, nz);
         const landR = GLOBE_RADIUS + h;
         const seaR = GLOBE_RADIUS + WATER_H;
-        if (d <= landR && d > landR - VS * 3) {
+        if (d <= landR && d > landR - VS * SHELL_DEPTH) {
           clientVoxels.set(`${ix},${iy},${iz}`, 1);
         } else if (d > landR && h < WATER_H && d <= seaR) {
           clientVoxels.set(`${ix},${iy},${iz}`, 2);
