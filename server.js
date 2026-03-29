@@ -19,9 +19,9 @@ const PORT = process.env.PORT || 3000;
 const GLOBE_RADIUS = 5;
 const TICK_RATE = 20;
 const TICK_MS = 1000 / TICK_RATE;
-const VOXEL_SIZE = 0.012;
+const VOXEL_SIZE = 0.06;
 const WATER_H = -0.10;
-const GRID_HALF = Math.ceil((GLOBE_RADIUS + 0.5) / VOXEL_SIZE); // 459
+const GRID_HALF = Math.ceil((GLOBE_RADIUS + 0.5) / VOXEL_SIZE); // 92
 
 // ── Age System ──
 const AGE_NAMES = ['Stone Age', 'Industrial Age', 'Modern Age', 'Space Age'];
