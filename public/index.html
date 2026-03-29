@@ -427,13 +427,12 @@ function createGlobe() {
     const avgH = (h0 + h1 + h2) / 3;
     const isWaterTri = avgH < WATER_H;
 
-    // All triangles sit at their natural terrain height.
-    // Water triangles are flat (use avgH so all 3 verts same radius = flat face).
-    // Land triangles use per-vertex height for terrain relief.
+    // All triangles displaced by their individual vertex height — water is just a color change
+    const hs = [h0, h1, h2];
     for (let k = 0; k < 3; k++) {
       const { nx, ny, nz } = verts[k];
-      const h = isWaterTri ? avgH : [h0, h1, h2][k];
-      pos.setXYZ(t+k, nx*(GLOBE_RADIUS + h), ny*(GLOBE_RADIUS + h), nz*(GLOBE_RADIUS + h));
+      const r = GLOBE_RADIUS + hs[k];
+      pos.setXYZ(t+k, nx*r, ny*r, nz*r);
     }
 
     // Single flat color per triangle (no gradient blending — clean triangle edges)
@@ -444,7 +443,7 @@ function createGlobe() {
     let c;
 
     if (isWaterTri) {
-      c = avgH < -0.20 ? new THREE.Color(0x0a1e32) : new THREE.Color(0x18406e);
+      c = new THREE.Color(0x1a5080); // all water triangles same clean blue
     } else if (lat > 0.82) {
       c = new THREE.Color(0xe8f2f8);
     } else if (avgH < WATER_H + 0.08) {
