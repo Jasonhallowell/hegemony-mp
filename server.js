@@ -182,20 +182,32 @@ function generateVoxelGlobe() {
   const landSurface = new Set();
   const waterSurface = new Set();
 
-  // Only iterate the thin shell around the globe surface (not the full cube)
-  const minR = GLOBE_RADIUS - 1.0;  // well below lowest terrain
-  const maxR = GLOBE_RADIUS + 1.0;  // well above highest terrain
-  const iMin = Math.floor(minR / VS);
+  // Only iterate the thin spherical shell — compute valid iz range per (ix,iy)
+  const minR = GLOBE_RADIUS - 1.0;
+  const maxR = GLOBE_RADIUS + 1.0;
   const iMax = Math.ceil(maxR / VS);
+  const minR2 = minR * minR;
+  const maxR2 = maxR * maxR;
 
   for (let ix = -iMax; ix <= iMax; ix++) {
+    const x2 = (ix * VS) * (ix * VS);
+    if (x2 > maxR2) continue;
     for (let iy = -iMax; iy <= iMax; iy++) {
-      for (let iz = -iMax; iz <= iMax; iz++) {
+      const xy2 = x2 + (iy * VS) * (iy * VS);
+      if (xy2 > maxR2) continue;
+
+      // Compute the iz range that falls within the shell [minR, maxR]
+      const remMax = maxR2 - xy2;
+      if (remMax < 0) continue;
+      const izOuter = Math.floor(Math.sqrt(remMax) / VS);
+      const remMin = minR2 - xy2;
+      const izInner = remMin > 0 ? Math.ceil(Math.sqrt(remMin) / VS) : 0;
+
+      // Only iterate the two thin bands: [-izOuter,-izInner] and [izInner,izOuter]
+      for (let iz = -izOuter; iz <= izOuter; iz++) {
+        if (iz > -izInner && iz < izInner) continue;
         const cx = ix * VS, cy = iy * VS, cz = iz * VS;
-        const d2 = cx * cx + cy * cy + cz * cz;
-        // Quick bounding sphere check to skip most cells
-        if (d2 < minR * minR || d2 > maxR * maxR) continue;
-        const d = Math.sqrt(d2);
+        const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
         if (d < 0.001) continue;
 
         const dir = normalize({ x: cx, y: cy, z: cz });
@@ -204,9 +216,9 @@ function generateVoxelGlobe() {
         const seaR = GLOBE_RADIUS + WATER_H;
 
         if (d <= landR && d > landR - VS * SHELL_DEPTH) {
-          voxels.set(`${ix},${iy},${iz}`, 1); // land
+          voxels.set(`${ix},${iy},${iz}`, 1);
         } else if (d > landR && h < WATER_H && d <= seaR) {
-          voxels.set(`${ix},${iy},${iz}`, 2); // water
+          voxels.set(`${ix},${iy},${iz}`, 2);
         }
       }
     }

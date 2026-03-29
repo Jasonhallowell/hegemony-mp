@@ -416,14 +416,26 @@ function generateClientVoxels() {
   const minR = GLOBE_RADIUS - 1.0;
   const maxR = GLOBE_RADIUS + 1.0;
   const iMax = Math.ceil(maxR / VS);
+  const minR2 = minR * minR;
+  const maxR2 = maxR * maxR;
 
   for (let ix = -iMax; ix <= iMax; ix++) {
+    const x2 = (ix * VS) * (ix * VS);
+    if (x2 > maxR2) continue;
     for (let iy = -iMax; iy <= iMax; iy++) {
-      for (let iz = -iMax; iz <= iMax; iz++) {
+      const xy2 = x2 + (iy * VS) * (iy * VS);
+      if (xy2 > maxR2) continue;
+
+      const remMax = maxR2 - xy2;
+      if (remMax < 0) continue;
+      const izOuter = Math.floor(Math.sqrt(remMax) / VS);
+      const remMin = minR2 - xy2;
+      const izInner = remMin > 0 ? Math.ceil(Math.sqrt(remMin) / VS) : 0;
+
+      for (let iz = -izOuter; iz <= izOuter; iz++) {
+        if (iz > -izInner && iz < izInner) continue;
         const cx = ix * VS, cy = iy * VS, cz = iz * VS;
-        const d2 = cx*cx + cy*cy + cz*cz;
-        if (d2 < minR * minR || d2 > maxR * maxR) continue;
-        const d = Math.sqrt(d2);
+        const d = Math.sqrt(cx*cx + cy*cy + cz*cz);
         if (d < 0.001) continue;
         const nx = cx/d, ny = cy/d, nz = cz/d;
         const h = triHeight(nx, ny, nz);
