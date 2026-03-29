@@ -1713,16 +1713,21 @@ function updateEntities(dt) {
 
     // ── Smooth interpolation for mobile units ──
     if (!sd.isBuilding && sd.type !== 'resource') {
+      // Save pre-lerp position for missile facing
+      const prevPos = ent.mesh.position.clone();
       ent.mesh.position.lerp(ent.targetPos, 0.22);
 
       const isMissile = sd.type === 'silo_missile' || sd.type === 'nuke' || sd.type === 'rocket';
       if (isMissile) {
-        // Missiles/nukes: orient body axis (local Y) along direction of travel
-        const vel = ent.targetPos.clone().sub(ent.mesh.position);
-        if (vel.lengthSq() > 1e-8) {
+        // Missiles: orient body axis (local Y) along actual frame-to-frame movement
+        const vel = ent.mesh.position.clone().sub(prevPos);
+        if (vel.lengthSq() > 1e-10) {
           const dir = vel.normalize();
-          const targetQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-          ent.mesh.quaternion.slerp(targetQuat, 0.25);
+          // Store stable direction to avoid jitter
+          if (!ent.lastMissileDir) ent.lastMissileDir = dir.clone();
+          ent.lastMissileDir.lerp(dir, 0.08).normalize();
+          const targetQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), ent.lastMissileDir);
+          ent.mesh.quaternion.slerp(targetQuat, 0.12);
         }
       } else {
         // Face toward target position (not frame delta) for stable orientation

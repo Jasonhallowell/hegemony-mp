@@ -917,7 +917,7 @@ class GameRoom {
     }
 
     // Create crater
-    createCrater(worldPos, 0.4, this);
+    createCrater(worldPos, 0.6, this);
 
     this.events.push({ type: 'nuke_explosion', pos: { ...pos } });
     this.destroyEntity(nuke);
@@ -975,7 +975,7 @@ class GameRoom {
               if (other.hp <= 0) this.destroyEntity(other);
             }
           }
-          createCrater(worldPos, 0.16, this);
+          createCrater(worldPos, 0.25, this);
           this.events.push({ type: 'explosion', pos: { ...e.pos } });
           this.destroyEntity(e);
         }
