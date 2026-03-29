@@ -323,7 +323,6 @@ const canvas   = document.getElementById('gameCanvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.2;
 
@@ -334,15 +333,16 @@ scene.fog = new THREE.FogExp2(0x020810, 0.016);
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
 camera.position.set(0, 4, 14);
 
-scene.add(new THREE.AmbientLight(0x334466, 0.6));
-const sunLight = new THREE.DirectionalLight(0xffeedd, 1.5);
-sunLight.position.set(10, 8, 5);
-sunLight.castShadow = true;
-sunLight.shadow.mapSize.set(2048, 2048);
-scene.add(sunLight);
-const rimLight = new THREE.DirectionalLight(0x4488ff, 0.4);
-rimLight.position.set(-5, 3, -8);
-scene.add(rimLight);
+// Uniform lighting from all sides
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+const light1 = new THREE.DirectionalLight(0xffffff, 0.5);
+light1.position.set(10, 8, 5); scene.add(light1);
+const light2 = new THREE.DirectionalLight(0xffffff, 0.5);
+light2.position.set(-10, -8, -5); scene.add(light2);
+const light3 = new THREE.DirectionalLight(0xffffff, 0.3);
+light3.position.set(-5, 10, -8); scene.add(light3);
+const light4 = new THREE.DirectionalLight(0xffffff, 0.3);
+light4.position.set(5, -10, 8); scene.add(light4);
 
 // Stars
 const sv = [];
@@ -392,15 +392,45 @@ function posOnSurface(n, offset = 0.15) {
   return new THREE.Vector3(n.x*f, n.y*f, n.z*f);
 }
 
-// ── Globe — Axis-aligned voxel cubes (Minecraft-style) ──
-let globeMesh;
-let cloudMesh;
+// ── Voxel surface position lookup ──
+function posOnVoxelSurface(n, offset) {
+  const len = Math.sqrt(n.x*n.x + n.y*n.y + n.z*n.z) || 1;
+  const dx = n.x/len, dy = n.y/len, dz = n.z/len;
+  const VS = VOXEL_SIZE;
+  // Scan from above expected surface downward to find topmost voxel
+  const maxR = GLOBE_RADIUS + 0.6;
+  const minR = GLOBE_RADIUS - 0.6;
+  for (let r = maxR; r >= minR; r -= VS * 0.5) {
+    const ix = Math.round(dx * r / VS);
+    const iy = Math.round(dy * r / VS);
+    const iz = Math.round(dz * r / VS);
+    const key = `${ix},${iy},${iz}`;
+    if (clientVoxels.has(key)) {
+      const cx = ix * VS, cy = iy * VS, cz = iz * VS;
+      const vr = Math.sqrt(cx*cx + cy*cy + cz*cz);
+      return new THREE.Vector3(dx, dy, dz).multiplyScalar(vr + VS/2 + offset);
+    }
+  }
+  // Fallback to noise-based
+  const h = getSurfaceHeight({x: dx, y: dy, z: dz});
+  return new THREE.Vector3(dx, dy, dz).multiplyScalar(h + offset);
+}
+
+// ── Globe — Chunked Voxel Rendering (Minecraft-style) ──
+let raycastSphere;
 
 const WATER_H = -0.10;
 const VOXEL_SIZE = 0.06;
-const GRID_HALF = Math.ceil((GLOBE_RADIUS + 0.5) / VOXEL_SIZE);
+const CHUNK_SIZE = 16;
 
 const clientVoxels = new Map(); // "ix,iy,iz" -> type (1=land, 2=water)
+const chunkVoxelSets = new Map(); // "cx,cy,cz" -> Set of voxel keys
+const chunkMeshes = new Map(); // "cx,cy,cz" -> THREE.Mesh
+
+function voxelToChunkKey(ix, iy, iz) {
+  const cs = CHUNK_SIZE;
+  return `${Math.floor(ix >= 0 ? ix/cs : (ix+1)/cs - 1)},${Math.floor(iy >= 0 ? iy/cs : (iy+1)/cs - 1)},${Math.floor(iz >= 0 ? iz/cs : (iz+1)/cs - 1)}`;
+}
 
 function triHeight(nx, ny, nz) {
   const s = 2.5;
@@ -411,6 +441,7 @@ function triHeight(nx, ny, nz) {
 
 function generateClientVoxels() {
   clientVoxels.clear();
+  chunkVoxelSets.clear();
   const VS = VOXEL_SIZE;
   const SHELL_DEPTH = 5;
   const minR = GLOBE_RADIUS - 1.0;
@@ -425,7 +456,6 @@ function generateClientVoxels() {
     for (let iy = -iMax; iy <= iMax; iy++) {
       const xy2 = x2 + (iy * VS) * (iy * VS);
       if (xy2 > maxR2) continue;
-
       const remMax = maxR2 - xy2;
       if (remMax < 0) continue;
       const izOuter = Math.floor(Math.sqrt(remMax) / VS);
@@ -441,17 +471,22 @@ function generateClientVoxels() {
         const h = triHeight(nx, ny, nz);
         const landR = GLOBE_RADIUS + h;
         const seaR = GLOBE_RADIUS + WATER_H;
-        if (d <= landR && d > landR - VS * SHELL_DEPTH) {
-          clientVoxels.set(`${ix},${iy},${iz}`, 1);
-        } else if (d > landR && h < WATER_H && d <= seaR) {
-          clientVoxels.set(`${ix},${iy},${iz}`, 2);
+        const vkey = `${ix},${iy},${iz}`;
+        let type = 0;
+        if (d <= landR && d > landR - VS * SHELL_DEPTH) type = 1;
+        else if (d > landR && h < WATER_H && d <= seaR) type = 2;
+        if (type) {
+          clientVoxels.set(vkey, type);
+          const ck = voxelToChunkKey(ix, iy, iz);
+          if (!chunkVoxelSets.has(ck)) chunkVoxelSets.set(ck, new Set());
+          chunkVoxelSets.get(ck).add(vkey);
         }
       }
     }
   }
 }
 
-// Face templates: CCW winding from outside, offsets from center in units of VS/2
+// Face templates: CCW winding from outside
 const VS_H = VOXEL_SIZE / 2;
 const FACE_DEFS = [
   { d:[1,0,0],  n:[1,0,0],  v:[[VS_H,-VS_H,-VS_H],[VS_H,VS_H,-VS_H],[VS_H,VS_H,VS_H],[VS_H,-VS_H,VS_H]] },
@@ -462,115 +497,106 @@ const FACE_DEFS = [
   { d:[0,0,-1], n:[0,0,-1], v:[[VS_H,-VS_H,-VS_H],[-VS_H,-VS_H,-VS_H],[-VS_H,VS_H,-VS_H],[VS_H,VS_H,-VS_H]] },
 ];
 
-function buildVoxelMesh(voxels) {
-  const VS = VOXEL_SIZE;
-  const positions = [];
-  const normals = [];
-  const colors = [];
+const chunkMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.04 });
 
-  for (const [key, type] of voxels) {
+function buildChunkMesh(chunkKey) {
+  const voxelKeys = chunkVoxelSets.get(chunkKey);
+  if (!voxelKeys || voxelKeys.size === 0) return null;
+  const VS = VOXEL_SIZE;
+  const positions = [], normals = [], colors = [];
+
+  for (const key of voxelKeys) {
+    const type = clientVoxels.get(key);
+    if (!type) continue;
     const [ix, iy, iz] = key.split(',').map(Number);
     const cx = ix * VS, cy = iy * VS, cz = iz * VS;
-
-    // Outward direction from globe center
     const d = Math.sqrt(cx*cx + cy*cy + cz*cz) || 1;
     const outX = cx/d, outY = cy/d, outZ = cz/d;
-
-    // Terrain properties for biome color
     const rawH = triHeight(outX, outY, outZ);
     const lat = Math.abs(outY);
     const heatN = fbmNoise(outX*3+20, outY*3+20, outZ*3+20);
 
-    // Determine biome colors (top face vs side face)
     let topColor, sideColor;
     if (type === 2) {
       topColor = rawH < -0.20 ? new THREE.Color(0x0e3860) : new THREE.Color(0x1a5080);
       sideColor = new THREE.Color(0x0a2848);
     } else {
-      if (lat > 0.82) {
-        topColor = new THREE.Color(0xe8f2f8);
-        sideColor = new THREE.Color(0x9098a0);
-      } else if (rawH < WATER_H + 0.08) {
-        topColor = new THREE.Color(0xc4b468);
-        sideColor = new THREE.Color(0x8a7a48);
-      } else if (rawH < 0.10) {
-        topColor = lat < 0.38 && heatN > 0.05 ? new THREE.Color(0xcc8828) : new THREE.Color(0x588040);
-        sideColor = new THREE.Color(0x6b5530);
-      } else if (rawH < 0.20) {
-        topColor = lat < 0.35 && heatN > 0.08 ? new THREE.Color(0xb07028) : new THREE.Color(0x386028);
-        sideColor = new THREE.Color(0x5a4428);
-      } else if (rawH < 0.30) {
-        topColor = new THREE.Color(0x787060);
-        sideColor = new THREE.Color(0x585048);
-      } else {
-        topColor = new THREE.Color(0xe8f0f4);
-        sideColor = new THREE.Color(0x9098a0);
-      }
+      if (lat > 0.82) { topColor = new THREE.Color(0xe8f2f8); sideColor = new THREE.Color(0x9098a0); }
+      else if (rawH < WATER_H + 0.08) { topColor = new THREE.Color(0xc4b468); sideColor = new THREE.Color(0x8a7a48); }
+      else if (rawH < 0.10) { topColor = lat < 0.38 && heatN > 0.05 ? new THREE.Color(0xcc8828) : new THREE.Color(0x588040); sideColor = new THREE.Color(0x6b5530); }
+      else if (rawH < 0.20) { topColor = lat < 0.35 && heatN > 0.08 ? new THREE.Color(0xb07028) : new THREE.Color(0x386028); sideColor = new THREE.Color(0x5a4428); }
+      else if (rawH < 0.30) { topColor = new THREE.Color(0x787060); sideColor = new THREE.Color(0x585048); }
+      else { topColor = new THREE.Color(0xe8f0f4); sideColor = new THREE.Color(0x9098a0); }
     }
 
     for (const face of FACE_DEFS) {
       const nk = `${ix+face.d[0]},${iy+face.d[1]},${iz+face.d[2]}`;
-      if (voxels.has(nk)) continue; // hidden face
-
-      // Is this the "top" face? (normal aligns with outward from globe center)
+      if (clientVoxels.has(nk)) continue;
       const dotOut = face.n[0]*outX + face.n[1]*outY + face.n[2]*outZ;
       const color = dotOut > 0.4 ? topColor : sideColor;
-
       const v = face.v;
-      // Triangle 1: v0, v1, v2
-      positions.push(cx+v[0][0], cy+v[0][1], cz+v[0][2]);
-      positions.push(cx+v[1][0], cy+v[1][1], cz+v[1][2]);
-      positions.push(cx+v[2][0], cy+v[2][1], cz+v[2][2]);
-      // Triangle 2: v0, v2, v3
-      positions.push(cx+v[0][0], cy+v[0][1], cz+v[0][2]);
-      positions.push(cx+v[2][0], cy+v[2][1], cz+v[2][2]);
-      positions.push(cx+v[3][0], cy+v[3][1], cz+v[3][2]);
-
-      for (let i = 0; i < 6; i++) {
-        normals.push(face.n[0], face.n[1], face.n[2]);
-        colors.push(color.r, color.g, color.b);
-      }
+      positions.push(cx+v[0][0],cy+v[0][1],cz+v[0][2], cx+v[1][0],cy+v[1][1],cz+v[1][2], cx+v[2][0],cy+v[2][1],cz+v[2][2]);
+      positions.push(cx+v[0][0],cy+v[0][1],cz+v[0][2], cx+v[2][0],cy+v[2][1],cz+v[2][2], cx+v[3][0],cy+v[3][1],cz+v[3][2]);
+      for (let i = 0; i < 6; i++) { normals.push(face.n[0], face.n[1], face.n[2]); colors.push(color.r, color.g, color.b); }
     }
   }
 
+  if (positions.length === 0) return null;
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-  return geo;
+  return new THREE.Mesh(geo, chunkMaterial);
 }
 
-function rebuildVoxelMesh() {
-  if (globeMesh) { globeGroup.remove(globeMesh); globeMesh.geometry.dispose(); }
-  const geo = buildVoxelMesh(clientVoxels);
-  globeMesh = new THREE.Mesh(geo,
-    new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0.04 })
-  );
-  globeMesh.castShadow = true;
-  globeMesh.receiveShadow = true;
-  globeGroup.add(globeMesh);
+function buildAllChunks() {
+  for (const [key, mesh] of chunkMeshes) { globeGroup.remove(mesh); mesh.geometry.dispose(); }
+  chunkMeshes.clear();
+  for (const [chunkKey] of chunkVoxelSets) {
+    const mesh = buildChunkMesh(chunkKey);
+    if (mesh) { chunkMeshes.set(chunkKey, mesh); globeGroup.add(mesh); }
+  }
+}
+
+function rebuildChunks(dirtySet) {
+  for (const chunkKey of dirtySet) {
+    const old = chunkMeshes.get(chunkKey);
+    if (old) { globeGroup.remove(old); old.geometry.dispose(); chunkMeshes.delete(chunkKey); }
+    if (chunkVoxelSets.has(chunkKey) && chunkVoxelSets.get(chunkKey).size > 0) {
+      const mesh = buildChunkMesh(chunkKey);
+      if (mesh) { chunkMeshes.set(chunkKey, mesh); globeGroup.add(mesh); }
+    }
+  }
+}
+
+function removeVoxelsAndRebuild(keys) {
+  const dirty = new Set();
+  for (const key of keys) {
+    if (!clientVoxels.has(key)) continue;
+    clientVoxels.delete(key);
+    const [ix, iy, iz] = key.split(',').map(Number);
+    const ck = voxelToChunkKey(ix, iy, iz);
+    dirty.add(ck);
+    const cs = chunkVoxelSets.get(ck);
+    if (cs) { cs.delete(key); if (cs.size === 0) chunkVoxelSets.delete(ck); }
+    // Neighbor chunks may have newly exposed border faces
+    for (const [ddx, ddy, ddz] of [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]]) {
+      const nck = voxelToChunkKey(ix+ddx, iy+ddy, iz+ddz);
+      if (nck !== ck) dirty.add(nck);
+    }
+  }
+  rebuildChunks(dirty);
 }
 
 function createGlobe() {
   generateClientVoxels();
-  rebuildVoxelMesh();
-
-  // Atmosphere glow
-  globeGroup.add(new THREE.Mesh(
-    new THREE.SphereGeometry(GLOBE_RADIUS * 1.025, 48, 48),
-    new THREE.ShaderMaterial({
-      vertexShader:   `varying vec3 vN; void main(){vN=normalize(normalMatrix*normal);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
-      fragmentShader: `varying vec3 vN; void main(){float i=pow(0.72-dot(vN,vec3(0,0,1)),2.5);gl_FragColor=vec4(0.28,0.68,1.,i*0.45);}`,
-      transparent: true, side: THREE.BackSide, depthWrite: false,
-    })
-  ));
-
-  // Cloud layer
-  cloudMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(GLOBE_RADIUS * 1.05, 36, 36),
-    new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.10, roughness: 1.0, depthWrite: false })
+  buildAllChunks();
+  // Invisible sphere for raycasting clicks
+  raycastSphere = new THREE.Mesh(
+    new THREE.SphereGeometry(GLOBE_RADIUS + 0.3, 48, 48),
+    new THREE.MeshBasicMaterial({ visible: false })
   );
-  globeGroup.add(cloudMesh);
+  globeGroup.add(raycastSphere);
 }
 
 createGlobe();
@@ -618,7 +644,7 @@ function getGlobeNormal(event) {
   mouseVec.x = (event.clientX / window.innerWidth) * 2 - 1;
   mouseVec.y = -(event.clientY / window.innerHeight) * 2 + 1;
   raycaster.setFromCamera(mouseVec, camera);
-  const hits = raycaster.intersectObject(globeMesh);
+  const hits = raycaster.intersectObject(raycastSphere);
   return hits.length > 0 ? hits[0].point.clone().normalize() : null;
 }
 
@@ -650,7 +676,7 @@ function buildModel(type, fc) {
   }
   function mesh(geo, color, emissive, rough, metal) {
     const m = new THREE.Mesh(geo, mat(color, emissive, rough, metal));
-    m.castShadow = true;
+    m.castShadow = false;
     return m;
   }
   function add(geo, color, emissive, rough, metal) {
@@ -1036,8 +1062,19 @@ function applyState(stateMsg) {
     ent.serverData = sd;
 
     const n = sd.pos;
-    const surfOffset = sd.isAir ? 0.55 : sd.isNaval ? 0.06 : (sd.isBuilding ? 0.14 : 0.12);
-    const pos = posOnSurface(n, surfOffset);
+    let surfOffset;
+    if (sd.type === 'nuke' || sd.type === 'rocket') {
+      surfOffset = (sd.altitude || 0) + 0.1;
+    } else if (sd.isAir) {
+      surfOffset = 0.55;
+    } else if (sd.isNaval) {
+      surfOffset = 0.03;
+    } else if (sd.isBuilding || sd.type === 'site') {
+      surfOffset = 0; // foundation embedded in voxel
+    } else {
+      surfOffset = 0; // units touch the voxel
+    }
+    const pos = posOnVoxelSurface(n, surfOffset);
     const up  = new THREE.Vector3(n.x, n.y, n.z).normalize();
 
     // Store interpolation targets — gameLoop will lerp toward these
@@ -1095,8 +1132,7 @@ function applyState(stateMsg) {
     if (ev.type === 'projectile')     spawnProjectile(ev.from, ev.to, ev.faction, ev.unitType);
     if (ev.type === 'build_complete') spawnBuildComplete(ev.pos);
     if (ev.type === 'crater') {
-      for (const key of ev.removed) clientVoxels.delete(key);
-      rebuildVoxelMesh();
+      removeVoxelsAndRebuild(ev.removed);
     }
   }
 
@@ -1243,8 +1279,8 @@ function spawnProjectile(from, to, faction, unitType) {
   projectiles.push({
     mesh: projectileMesh,
     start: startPos, end: endPos, t: 0,
-    arcHeight: isMissile ? Math.max(1.0, dist * 0.55) : (isHeavy ? Math.max(0.25, dist * 0.18) : Math.max(0.12, dist * 0.10)),
-    speed: isMissile ? 1.8 : (isHeavy ? 3.2 : 5.5),
+    arcHeight: isMissile ? Math.max(2.0, dist * 0.8) : (isHeavy ? Math.max(0.25, dist * 0.18) : Math.max(0.12, dist * 0.10)),
+    speed: isMissile ? 1.2 : (isHeavy ? 3.2 : 5.5),
     isMissile,
   });
 }
@@ -1605,8 +1641,7 @@ function connectWS() {
       case 'gameStart':
         client.gameStarted = true;
         if (msg.destroyedVoxels && msg.destroyedVoxels.length > 0) {
-          for (const key of msg.destroyedVoxels) clientVoxels.delete(key);
-          rebuildVoxelMesh();
+          removeVoxelsAndRebuild(msg.destroyedVoxels);
         }
         document.getElementById('lobbyOverlay').classList.add('hidden');
         document.getElementById('bottomPanel').style.display = 'flex';
@@ -1704,9 +1739,6 @@ function gameLoop() {
   updateCamera();
   updateParticlesAndProjectiles(dt);
   updateEntities(dt);
-
-  // Slowly rotate clouds
-  if (cloudMesh) cloudMesh.rotation.y += dt * 0.015;
 
   if (client.gameStarted) {
     updateMinimap();

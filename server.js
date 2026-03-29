@@ -665,6 +665,7 @@ class GameRoom {
       gathering: false, gatherCooldown: 0, constructTarget: null,
       path: null, pathIndex: 0,
       alive: true, name: def.name,
+      altitude: 0, flightStart: null, flightTotal: 0,
     };
     this.entities.push(entity);
     const player = Object.values(this.players).find(p => p.faction === entity.faction);
@@ -675,9 +676,13 @@ class GameRoom {
 
   computePath(entity, targetNormal) {
     if (entity.isAir) {
-      // Air units move directly, no pathfinding needed
       entity.path = [normalize(targetNormal)];
       entity.pathIndex = 0;
+      // Track ballistic flight for nukes and rockets
+      if (entity.isNuke || entity.type === 'rocket') {
+        entity.flightStart = { ...entity.pos };
+        entity.flightTotal = angleBetween(entity.pos, targetNormal);
+      }
       return true;
     }
 
@@ -936,6 +941,13 @@ class GameRoom {
         }
       }
 
+      // ── Ballistic altitude for nukes/rockets ──
+      if ((e.isNuke || e.type === 'rocket') && e.flightTotal > 0.01 && e.flightStart) {
+        const remaining = e.path ? angleBetween(e.pos, e.path[e.path.length - 1]) : 0;
+        const progress = Math.max(0, Math.min(1, 1 - (remaining / e.flightTotal)));
+        e.altitude = Math.sin(progress * Math.PI) * Math.min(e.flightTotal * GLOBE_RADIUS * 0.4, 3.0);
+      }
+
       if (!e.alive) continue;
 
       // ── Gathering ──
@@ -1083,6 +1095,7 @@ class GameRoom {
         resourceType: e.resourceType, amount: e.amount, maxAmount: e.maxAmount,
         gathering: e.gathering, attack: e.attack, range: e.range, gatherRate: e.gatherRate,
         buildType: e.buildType, buildProgress: e.buildProgress, buildTime: e.buildTime,
+        altitude: e.altitude || 0,
       }));
 
     const playerStates = {};
