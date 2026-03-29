@@ -101,7 +101,7 @@ const UNIT_DEFS = {
     name: 'Nuclear ICBM', hp: 60, maxHp: 60, speed: 2.0, attack: 400,
     cost: { minerals: 800, energy: 500 }, popCost: 3,
     isBuilding: false, minAge: 3, isAir: true,
-    isNuke: true, nukeRadius: 2.5,
+    isNuke: true, nukeRadius: 0.5,
   },
 };
 
@@ -917,7 +917,7 @@ class GameRoom {
     }
 
     // Create crater
-    createCrater(worldPos, 2.0, this);
+    createCrater(worldPos, 0.4, this);
 
     this.events.push({ type: 'nuke_explosion', pos: { ...pos } });
     this.destroyEntity(nuke);
@@ -969,13 +969,13 @@ class GameRoom {
           for (const other of this.entities) {
             if (!other.alive || other.id === e.id) continue;
             const dist = angleBetween(e.pos, other.pos) * GLOBE_RADIUS;
-            if (dist <= 1.2) {
-              const falloff = Math.max(0, 1 - dist / 1.2 * 0.6);
+            if (dist <= 0.24) {
+              const falloff = Math.max(0, 1 - dist / 0.24 * 0.6);
               other.hp -= 80 * falloff;
               if (other.hp <= 0) this.destroyEntity(other);
             }
           }
-          createCrater(worldPos, 0.8, this);
+          createCrater(worldPos, 0.16, this);
           this.events.push({ type: 'explosion', pos: { ...e.pos } });
           this.destroyEntity(e);
         }
@@ -1130,7 +1130,8 @@ class GameRoom {
         continue;
       }
 
-      // ── Attack ──
+      // ── Attack (silos only fire missiles, never bullets) ──
+      if (e.type === 'silo') continue;
       if (e.attackTarget && e.attack) {
         const tgt = this.entities.find(t => t.id === e.attackTarget);
         if (!tgt || !tgt.alive) { e.attackTarget = null; e.target = null; e.path = null; continue; }
@@ -1145,7 +1146,7 @@ class GameRoom {
 
             if (e.type === 'tank' || e.type === 'turret' || e.type === 'boat') {
               const worldHit = { x: tgt.pos.x * GLOBE_RADIUS, y: tgt.pos.y * GLOBE_RADIUS, z: tgt.pos.z * GLOBE_RADIUS };
-              createCrater(worldHit, 0.4, this);
+              createCrater(worldHit, 0.08, this);
             }
 
             if (tgt.hp <= 0) { this.destroyEntity(tgt); e.attackTarget = null; e.target = null; e.path = null; }

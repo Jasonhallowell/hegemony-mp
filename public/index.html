@@ -1715,17 +1715,28 @@ function updateEntities(dt) {
     if (!sd.isBuilding && sd.type !== 'resource') {
       ent.mesh.position.lerp(ent.targetPos, 0.22);
 
-      // Face toward target position (not frame delta) for stable orientation
-      const toTarget = ent.targetPos.clone().sub(ent.mesh.position);
-      if (toTarget.lengthSq() > 1e-8) {
-        const upDot = toTarget.dot(up);
-        const forward = toTarget.clone().sub(up.clone().multiplyScalar(upDot)).normalize();
-        if (forward.lengthSq() > 0.001) {
-          const right = new THREE.Vector3().crossVectors(forward, up).normalize();
-          const targetQuat = new THREE.Quaternion().setFromRotationMatrix(
-            new THREE.Matrix4().makeBasis(forward, up, right)
-          );
-          ent.mesh.quaternion.slerp(targetQuat, 0.15);
+      const isMissile = sd.type === 'silo_missile' || sd.type === 'nuke' || sd.type === 'rocket';
+      if (isMissile) {
+        // Missiles/nukes: orient body axis (local Y) along direction of travel
+        const vel = ent.targetPos.clone().sub(ent.mesh.position);
+        if (vel.lengthSq() > 1e-8) {
+          const dir = vel.normalize();
+          const targetQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+          ent.mesh.quaternion.slerp(targetQuat, 0.25);
+        }
+      } else {
+        // Face toward target position (not frame delta) for stable orientation
+        const toTarget = ent.targetPos.clone().sub(ent.mesh.position);
+        if (toTarget.lengthSq() > 1e-8) {
+          const upDot = toTarget.dot(up);
+          const forward = toTarget.clone().sub(up.clone().multiplyScalar(upDot)).normalize();
+          if (forward.lengthSq() > 0.001) {
+            const right = new THREE.Vector3().crossVectors(forward, up).normalize();
+            const targetQuat = new THREE.Quaternion().setFromRotationMatrix(
+              new THREE.Matrix4().makeBasis(forward, up, right)
+            );
+            ent.mesh.quaternion.slerp(targetQuat, 0.15);
+          }
         }
       }
     }
