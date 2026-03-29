@@ -927,10 +927,14 @@ class GameRoom {
     const dt = TICK_MS / 1000;
     this.events = [];
 
-    // Passive income (scales with age)
+    // Passive income (scales with age) — solo mode gives p1 unlimited
     for (const p of Object.values(this.players)) {
-      p.energy   += (1 + p.age * 0.5) * dt;
-      p.minerals += p.age * 0.2 * dt;
+      if (this.soloMode && p.id === 'p1') {
+        p.minerals = 99999; p.energy = 99999; p.popCap = 999;
+      } else {
+        p.energy   += (1 + p.age * 0.5) * dt;
+        p.minerals += p.age * 0.2 * dt;
+      }
     }
 
     for (const e of this.entities) {
@@ -1237,7 +1241,33 @@ class GameRoom {
 // ── Server ──
 let currentRoom = new GameRoom();
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const isSolo = url.searchParams.has('solo');
+
+  if (isSolo) {
+    // Solo mode: fresh room, auto-start with dummy opponent
+    const room = new GameRoom();
+    room.soloMode = true;
+    const playerId = room.addPlayer(ws);
+    if (!playerId) return;
+    // Create dummy p2 (no websocket, just sits there)
+    room.players['p2'] = {
+      ws: { readyState: 0, send() {} }, id: 'p2', faction: 2,
+      minerals: 500, energy: 200, pop: 0, popCap: 10, age: 0,
+    };
+    room.startGame();
+
+    ws.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data);
+        if (msg.type === 'command') room.handleCommand(playerId, msg);
+      } catch (err) { console.error('Bad message:', err); }
+    });
+    ws.on('close', () => { room.removePlayer(playerId); room.stop(); });
+    return;
+  }
+
   if (Object.keys(currentRoom.players).length >= 2 && currentRoom.started)
     currentRoom = new GameRoom();
 

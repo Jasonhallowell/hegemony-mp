@@ -1643,7 +1643,8 @@ function updateLobby(msg) {
 // ── WebSocket ──
 function connectWS() {
   const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${protocol}://${window.location.host}`);
+  const solo = new URLSearchParams(window.location.search).has('solo');
+  const ws = new WebSocket(`${protocol}://${window.location.host}${solo ? '?solo' : ''}`);
   client.ws = ws;
 
   ws.onopen = () => {
